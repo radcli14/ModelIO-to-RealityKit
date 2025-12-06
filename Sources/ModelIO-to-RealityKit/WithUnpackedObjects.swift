@@ -30,7 +30,7 @@ extension MDLAsset: WithUnpackedObjects {
     }
 }
 
-extension MDLObject {
+extension MDLObject: WithUnpackedObjects {
     /// Unpack the children to an array of `MDLObject`
     var objects: [MDLObject] {
         var result = [MDLObject]()
