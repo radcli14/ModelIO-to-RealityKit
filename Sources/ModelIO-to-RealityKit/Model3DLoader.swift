@@ -14,14 +14,14 @@ public class Model3DLoader {
     let url: URL
     let asset: MDLAsset
     
-    init(filename: String, fileExtension: String) {
+    public init(filename: String, fileExtension: String) {
         url = Bundle.main.url(forResource: filename, withExtension: fileExtension)! // TODO: error handling
         
         // Load the asset using Model I/O.
         asset = MDLAsset(url: url)
     }
     
-    func loadEntity() async -> ModelEntity? {
+    public func loadEntity() async -> ModelEntity? {
         await asset.getModelEntity()
     }
 }
