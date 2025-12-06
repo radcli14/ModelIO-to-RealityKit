@@ -9,7 +9,7 @@ import Foundation
 import ModelIO
 import RealityKit
 
-extension ModelEntity {
+public extension ModelEntity {
     /// Create a `ModelEntity` from a `URL` for a file that is of a type supported by `ModelIO`
     @MainActor
     static func fromMDLAsset(url: URL) async -> ModelEntity? {
