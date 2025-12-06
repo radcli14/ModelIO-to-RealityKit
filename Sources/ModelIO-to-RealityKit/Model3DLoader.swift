@@ -11,8 +11,8 @@ import RealityKit
 
 /// Handles processing an asset created using `ModelIO` to create a `RealityKit.Entity`
 public class Model3DLoader {
-    let url: URL
-    let asset: MDLAsset
+    public let url: URL
+    public let asset: MDLAsset
     
     public init(filename: String, fileExtension: String) {
         url = Bundle.main.url(forResource: filename, withExtension: fileExtension)! // TODO: error handling
