@@ -10,7 +10,7 @@ import ModelIO
 import RealityKit
 
 
-extension MDLMesh {
+public extension MDLMesh {
     private var vertexDescriptorAttributes: [MDLVertexAttribute] {
         vertexDescriptor.attributes.compactMap {
             $0 as? MDLVertexAttribute

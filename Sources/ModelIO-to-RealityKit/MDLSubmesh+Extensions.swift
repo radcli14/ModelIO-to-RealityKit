@@ -12,7 +12,7 @@ import RealityKit
 /// A single `MDLMesh` can be composed of one or more `MDLSubmesh` instances.
 /// Here is where we find the indices that define face connectivity for the vertices defined at the `MDLMesh` level.
 /// Each submesh represents a distinct section of the geometry that uses a single material.
-extension MDLSubmesh {
+public extension MDLSubmesh {
     
     // MARK: - Mesh Indices
     

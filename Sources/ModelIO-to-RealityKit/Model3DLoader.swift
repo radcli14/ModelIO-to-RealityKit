@@ -10,7 +10,7 @@ import ModelIO
 import RealityKit
 
 /// Handles processing an asset created using `ModelIO` to create a `RealityKit.Entity`
-class Model3DLoader {
+public class Model3DLoader {
     let url: URL
     let asset: MDLAsset
     

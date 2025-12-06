@@ -10,7 +10,7 @@ import ModelIO
 import RealityKit
 
 
-extension MDLAsset {
+public extension MDLAsset {
     private var meshDescriptors: [MeshDescriptor] {
         meshes.map { $0.descriptor }
     }

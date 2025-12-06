@@ -8,11 +8,11 @@
 import Foundation
 import ModelIO
 
-protocol WithUnpackedObjects {
+public protocol WithUnpackedObjects {
     var objects: [MDLObject] { get }
 }
 
-extension WithUnpackedObjects {
+public extension WithUnpackedObjects {
     /// The `MDLMesh` instances inside of the `objects` array
     var meshes: [MDLMesh] {
         objects.compactMap { $0 as? MDLMesh }
@@ -21,7 +21,7 @@ extension WithUnpackedObjects {
 
 extension MDLAsset: WithUnpackedObjects {
     /// The array of `MDLObject` found in this `MDLAsset`
-    var objects: [MDLObject] {
+    public var objects: [MDLObject] {
         var result = [MDLObject]()
         for i in 0 ..< self.count {
             result.append(self.object(at: i))
@@ -32,7 +32,7 @@ extension MDLAsset: WithUnpackedObjects {
 
 extension MDLObject: WithUnpackedObjects {
     /// Unpack the children to an array of `MDLObject`
-    var objects: [MDLObject] {
+    public var objects: [MDLObject] {
         var result = [MDLObject]()
         for i in 0 ..< children.count {
             result.append(children[i])
