@@ -12,7 +12,7 @@ import RealityKit
 /// A single `MDLMesh` can be composed of one or more `MDLSubmesh` instances.
 /// Here is where we find the indices that define face connectivity for the vertices defined at the `MDLMesh` level.
 /// Each submesh represents a distinct section of the geometry that uses a single material.
-@MainActor public extension MDLSubmesh {
+public extension MDLSubmesh {
     
     // MARK: - Mesh Indices
     
@@ -54,7 +54,7 @@ import RealityKit
         return result
     }
     
-    var primitives: MeshDescriptor.Primitives? {
+    @MainActor var primitives: MeshDescriptor.Primitives? {
         var geometryString = ""
         switch geometryType {
         case .triangles: return .triangles(indices)
@@ -75,7 +75,7 @@ import RealityKit
     // TODO: Lots here, need to complete the import settings for materials
     
     /// Attempts to extract the Base Color, prioritizing texture, then numeric value.
-    var pbrBaseColor: PhysicallyBasedMaterial.BaseColor? {
+    @MainActor var pbrBaseColor: PhysicallyBasedMaterial.BaseColor? {
         let baseColorProperty = material?.property(with: .baseColor)
         
         // Check for a texture map (file reference), or a numeric value.
@@ -93,11 +93,11 @@ import RealityKit
         return nil
     }
     
-    var pbrNormal: PhysicallyBasedMaterial.Normal? {
+    @MainActor var pbrNormal: PhysicallyBasedMaterial.Normal? {
         return nil
     }
     
-    var pbrRoughness: PhysicallyBasedMaterial.Roughness? {
+    @MainActor var pbrRoughness: PhysicallyBasedMaterial.Roughness? {
         // TODO: add some better logic for when to use roughness vs specular, I'm using it the way I am here because it seemed lost in the Blender .obj file export
         let roughnessProperty = material?.property(with: .roughness)
         let specularProperty = material?.property(with: .specularExponent)
@@ -114,7 +114,7 @@ import RealityKit
         return nil
     }
     
-    var pbrMetallic: PhysicallyBasedMaterial.Metallic? {
+    @MainActor var pbrMetallic: PhysicallyBasedMaterial.Metallic? {
         let metallicProperty = material?.property(with: .metallic)
         if let _ = metallicProperty?.textureSamplerValue {
             // TODO: build from texture sampler
@@ -126,7 +126,7 @@ import RealityKit
     }
     
     /// The `PhysicallyBasedMaterial` representation of the material included in the submesh
-    var pbrMaterial: PhysicallyBasedMaterial? {
+    @MainActor var pbrMaterial: PhysicallyBasedMaterial? {
         guard material != nil else { return nil }
         
         var pbrMaterial = PhysicallyBasedMaterial()
@@ -144,36 +144,6 @@ import RealityKit
         }
 
         return pbrMaterial
-    }
-    
-    func printSummary() {
-        print("MDLSubmesh.printSummary()")
-        print(" - indexType: \(indexType)")
-        print(" - indexData: \(indexData)")
-        print(" - geometryType: triangles? \(geometryType == MDLGeometryType.triangles)")
-        //print(" - primitives: \(primitives)")
-        print(" - indexCount: \(indexCount)")
-        
-        let indices = self.indices
-        print(" - total indices: \(indices.count)")
-        
-        if geometryType == .triangles {
-            let triangleCount = indices.count / 3
-            print(" - triangle count: \(triangleCount)")
-            
-            // Print first few triangles to see the structure
-            let samplesToShow = min(5, triangleCount)
-            print(" - first \(samplesToShow) triangles:")
-            for i in 0..<samplesToShow {
-                let idx = i * 3
-                let v0 = indices[idx]
-                let v1 = indices[idx + 1]
-                let v2 = indices[idx + 2]
-                print("   Triangle \(i): [\(v0), \(v1), \(v2)]")
-            }
-        }
-        
-        print(" - material: \(material)")
     }
 }
 

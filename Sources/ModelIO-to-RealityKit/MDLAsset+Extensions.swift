@@ -14,7 +14,7 @@ import RealityKit
     
     /// An array of RealityKit `MeshDescriptor` derived from the meshes in this model
     var meshDescriptors: [MeshDescriptor] {
-        meshes.map { $0.descriptor }
+        meshes.flatMap { $0.descriptors }
     }
     
     /// Asynchrnously onbtain a RealityKit `MeshResource` derived from the meshes in this model

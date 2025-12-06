@@ -10,29 +10,35 @@ import ModelIO
 import RealityKit
 
 
-@MainActor public extension MDLMesh {
+public extension MDLMesh {
+    
+    /// An array of `MDLVertexAttribute` unpacked from the `vertexDescriptor.attributes` which is a `NSMutableArray` in the built-in `MDLMesh`
     private var vertexDescriptorAttributes: [MDLVertexAttribute] {
         vertexDescriptor.attributes.compactMap {
             $0 as? MDLVertexAttribute
         }
     }
     
+    /// The `MDLVertexAttribute` that contains the offset variable used for unpacking the position buffer
     private var positionAttribute: MDLVertexAttribute? {
         return vertexDescriptorAttributes.first {
             $0.name == MDLVertexAttributePosition
         }
     }
     
+    /// The `MDLMeshBuffer` that contains the buffer index and vertex position data
     private var positionBuffer: MDLMeshBuffer? {
         guard let index = positionAttribute?.bufferIndex else { return nil }
         return vertexBuffers[index]
     }
     
+    /// The `MDLVertexBufferLayout` which is used to get the stride
     private var vertexBufferLayout: MDLVertexBufferLayout? {
         guard let index = positionAttribute?.bufferIndex else { return nil }
         return vertexDescriptor.layouts[index] as? MDLVertexBufferLayout
     }
     
+    /// The array of 3D vertex positions representing points in the mesh
     var positions: [SIMD3<Float>] {
         guard let positionBuffer, let vertexBufferLayout, let positionAttribute else {
             return []
@@ -61,16 +67,8 @@ import RealityKit
         return result
     }
     
-    // TODO: add primitives
-    var descriptor: MeshDescriptor {
-        var descriptor = MeshDescriptor(name: name)
-        descriptor.positions = .init(positions)
-        let indices = submeshArray.compactMap { $0.indices }.flatMap { $0 }
-        
-        descriptor.primitives = .triangles(indices)
-        return descriptor
-    }
     
+    /// An array of `MDLSubmesh` unpacked from the `submeshes` variable which is a `NSMutableArray` in the built-in `MDLMesh`
     var submeshArray: [MDLSubmesh] {
         guard let submeshes else { return [] }
         var result = [MDLSubmesh]()
@@ -80,5 +78,22 @@ import RealityKit
             }
         }
         return result
+    }
+    
+    // MARK: - RealityKit
+    
+    /// An array of `MeshDescriptor` derived from the `positions` array and primitive indices contained in the `submeshes`
+    @MainActor var descriptors: [MeshDescriptor] {
+        
+        // Get the computed property first, so it isn't computed multiple times inside the map
+        let positions = positions
+        
+        // Map the mesh descriptors from the vertex positions, and primitives in the submesh
+        return submeshArray.map { submesh in
+            var descriptor = MeshDescriptor(name: name)
+            descriptor.positions = .init(positions)
+            descriptor.primitives = submesh.primitives
+            return descriptor
+        }
     }
 }
