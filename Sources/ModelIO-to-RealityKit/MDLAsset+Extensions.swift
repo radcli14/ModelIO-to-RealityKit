@@ -7,10 +7,10 @@
 
 import Foundation
 import ModelIO
-@preconcurrency import RealityKit
+import RealityKit
 
 
-public extension MDLAsset {
+@MainActor public extension MDLAsset {
     
     /// An array of RealityKit `MeshDescriptor` derived from the meshes in this model
     var meshDescriptors: [MeshDescriptor] {
@@ -20,7 +20,8 @@ public extension MDLAsset {
     /// Asynchrnously onbtain a RealityKit `MeshResource` derived from the meshes in this model
     func getMeshResource() async -> MeshResource? {
         do {
-            return try await MeshResource(from: meshDescriptors)
+            let sendableDescriptors = UnsafeSendableDescriptors(descriptors: meshDescriptors)
+            return try await MeshResource(from: sendableDescriptors.descriptors)
         } catch {
             print("MDLAsset.getMeshResource() failed because \(error.localizedDescription)")
             return nil
@@ -41,14 +42,20 @@ public extension MDLAsset {
         // Wrap materials in a Sendable wrapper to cross actor boundary
         let sendableMaterials = UnsafeSendableMaterials(materials: materials)
         guard let meshResource = await getMeshResource() else { return nil }
-        return await ModelEntity(mesh: meshResource, materials: sendableMaterials.materials)
+        return ModelEntity(mesh: meshResource, materials: sendableMaterials.materials)
     }
     
-    // TODO: I don't like the wrapper below, but it was a correction for "sending self.materials risks causing data races"
+    
+    // TODO: I don't like the wrappers below, but it was a correction for "sending self.materials risks causing data races"
     
     /// Wrapper to make non-Sendable materials transferable across actor boundaries
     private struct UnsafeSendableMaterials: @unchecked Sendable {
         let materials: [any RealityKit.Material]
+    }
+    
+    /// Wrapper to make non-Sendable descriptors transferable across actor boundaries
+    private struct UnsafeSendableDescriptors: @unchecked Sendable {
+        let descriptors: [MeshDescriptor]
     }
 }
 

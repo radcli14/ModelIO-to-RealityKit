@@ -21,6 +21,7 @@ public class Model3DLoader {
         asset = MDLAsset(url: url)
     }
     
+    @MainActor
     public func loadEntity() async -> ModelEntity? {
         await asset.getModelEntity()
     }
