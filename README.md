@@ -54,4 +54,4 @@ struct ContentView: View {
 }
 ```
 
-[Screenshot](screenshot.png)
+![Screenshot](screenshot.png)
