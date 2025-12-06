@@ -31,7 +31,7 @@ ModelEntity.fromMDLAsset(url: URL)
 
 In the example below, the project contains a Wavefront Object file named `shiny.obj` in its asset bundle.
 The usage of a URL from the asset bundle is a convenience, though this extension should work for any valid file URL that the app can access.
-This URL is cast to a `ModelEntity`, then rendered in a `RealityView`.
+This URL is used to initialize a `ModelEntity`, which is rendered in a `RealityView`.
 
 ```swift
 import SwiftUI
