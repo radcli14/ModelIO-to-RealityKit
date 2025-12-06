@@ -7,15 +7,18 @@
 
 import Foundation
 import ModelIO
-import RealityKit
+@preconcurrency import RealityKit
 
 
 public extension MDLAsset {
-    private var meshDescriptors: [MeshDescriptor] {
+    
+    /// An array of RealityKit `MeshDescriptor` derived from the meshes in this model
+    var meshDescriptors: [MeshDescriptor] {
         meshes.map { $0.descriptor }
     }
     
-    private func getMeshResource() async -> MeshResource? {
+    /// Asynchrnously onbtain a RealityKit `MeshResource` derived from the meshes in this model
+    func getMeshResource() async -> MeshResource? {
         do {
             return try await MeshResource(from: meshDescriptors)
         } catch {
@@ -24,6 +27,7 @@ public extension MDLAsset {
         }
     }
     
+    /// Any array of RealityKit materials derived from data in the submeshes
     var materials: [any RealityKit.Material] {
         meshes.flatMap { mesh in
             mesh.submeshArray.compactMap { submesh in
@@ -32,12 +36,19 @@ public extension MDLAsset {
         }
     }
 
+    /// Asynchronously obtain a `ModelEntity` based on the mesh resoources and materials contained in this asset
     func getModelEntity() async -> ModelEntity? {
+        // Wrap materials in a Sendable wrapper to cross actor boundary
+        let sendableMaterials = UnsafeSendableMaterials(materials: materials)
         guard let meshResource = await getMeshResource() else { return nil }
-        return await ModelEntity(mesh: meshResource, materials: materials)
+        return await ModelEntity(mesh: meshResource, materials: sendableMaterials.materials)
     }
     
-    func summary() {
-        //meshes.map { material}
+    // TODO: I don't like the wrapper below, but it was a correction for "sending self.materials risks causing data races"
+    
+    /// Wrapper to make non-Sendable materials transferable across actor boundaries
+    private struct UnsafeSendableMaterials: @unchecked Sendable {
+        let materials: [any RealityKit.Material]
     }
 }
+
