@@ -27,11 +27,11 @@ extension MDLMaterial {
     /// Get the texture sampler for this material and semantic, if available
     func getTextureSampler(mdlSemantic: MDLMaterialSemantic) -> MDLTextureSampler? {
         guard let materialProperty = property(with: mdlSemantic) else {
-            print("Failed to get property(with: \(mdlSemantic))")
+            //print("Failed to get property(with: \(mdlSemantic))")
             return nil
         }
         guard let sampler = materialProperty.textureSamplerValue else {
-            print("Failed to getTextureSampler(mdlSemantic: \(mdlSemantic))")
+            //print("Failed to getTextureSampler(mdlSemantic: \(mdlSemantic))")
             return nil
         }
         return sampler
@@ -40,11 +40,11 @@ extension MDLMaterial {
     /// Get the URL of a file (typically an image) associated with this property
     func getUrl(mdlSemantic: MDLMaterialSemantic) -> URL? {
         guard let materialProperty = property(with: mdlSemantic) else {
-            print("Failed to get property(with: \(mdlSemantic))")
+            //print("Failed to get property(with: \(mdlSemantic))")
             return nil
         }
         guard let url = materialProperty.urlValue else {
-            print("Failed to getUrl(with: \(mdlSemantic))")
+            //print("Failed to getUrl(with: \(mdlSemantic))")
             return nil
         }
         return url
@@ -56,8 +56,7 @@ extension MDLMaterial {
             return nil
         }
         guard let texture = sampler.texture else {
-            print("Failed to getTexture(mdlSemantic: \(mdlSemantic))")
-            //print("sampler.url", sampler.url, sampler.name)
+            //print("Failed to getTexture(mdlSemantic: \(mdlSemantic))")
             return nil
         }
         return texture
@@ -69,7 +68,7 @@ extension MDLMaterial {
             return nil
         }
         guard let image = texture.imageFromTexture()?.takeRetainedValue() else {
-            print("Failed to getImage(mdlSemantic: \(mdlSemantic))")
+            //print("Failed to getImage(mdlSemantic: \(mdlSemantic))")
             return nil
         }
         return image
@@ -84,7 +83,7 @@ extension MDLMaterial {
         // First try to load from a URL if it exists
         if let url = getUrl(mdlSemantic: mdlSemantic),
             let resource = try? await TextureResource(contentsOf: url) {
-            print("succeeded in getting a resource", resource, "from", url.lastPathComponent)
+            print("Succeeded in getting a resource", resource, "from", url.lastPathComponent)
             return resource
         }
         
@@ -93,7 +92,7 @@ extension MDLMaterial {
             return nil
         }
         guard let resource = try? await TextureResource(image: image, options: .init(semantic: rkSemantic)) else {
-            print("Failed to getTextureResource(mdlSemantic: \(mdlSemantic), rkSemantic: \(rkSemantic)")
+            //print("Failed to getTextureResource(mdlSemantic: \(mdlSemantic), rkSemantic: \(rkSemantic)")
             return nil
         }
         return resource
@@ -128,6 +127,8 @@ extension MDLMaterial {
         let specularProperty = property(with: .specularExponent)
         if let resource = await getTextureResource(mdlSemantic: .roughness, rkSemantic: .raw) {
             return .init(texture: .init(resource))
+        } else if let resource = await getTextureResource(mdlSemantic: .specularExponent, rkSemantic: .raw) {
+            return .init(texture: .init(resource))
         } else if let value = specularProperty?.floatValue {
             return .init(floatLiteral: sqrt(2.0 / (value + 2.0)))
         } else if let value = roughnessProperty?.floatValue {
@@ -149,6 +150,15 @@ extension MDLMaterial {
     
     /// The `PhysicallyBasedMaterial` representation of the material included in the submesh
     @MainActor func getPbrMaterial() async -> PhysicallyBasedMaterial? {
+        
+        // For debugging, I'm using this to try to find which semantics contain image urls
+        /*print("roughness", MDLMaterialSemantic.roughness.rawValue, MDLMaterialSemantic.specularExponent.rawValue)
+        for semantic in Self.allSemantics {
+            if let url = getUrl(mdlSemantic: semantic) {
+                print(semantic.rawValue, url)
+            }
+        }*/
+        
         var pbrMaterial = PhysicallyBasedMaterial()
         if let pbrBaseColor = await getPbrBaseColor() {
             pbrMaterial.baseColor = pbrBaseColor
@@ -165,4 +175,34 @@ extension MDLMaterial {
 
         return pbrMaterial
     }
+    
+    
+    static let allSemantics: [MDLMaterialSemantic] = [
+        .ambientOcclusion,
+        .ambientOcclusionScale,
+        .anisotropic,
+        .anisotropicRotation,
+        .baseColor,
+        .bump,
+        .clearcoat,
+        .clearcoatGloss,
+        .displacement,
+        .displacementScale,
+        .emission,
+        .interfaceIndexOfRefraction,
+        .materialIndexOfRefraction,
+        .metallic,
+        .none,
+        .objectSpaceNormal,
+        .opacity,
+        .roughness,
+        .sheen,
+        .sheenTint,
+        .specular,
+        .specularExponent,
+        .specularTint,
+        .subsurface,
+        .tangentSpaceNormal,
+        .userDefined
+    ]
 }
