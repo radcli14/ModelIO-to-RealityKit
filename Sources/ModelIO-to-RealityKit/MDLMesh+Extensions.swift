@@ -19,6 +19,8 @@ public extension MDLMesh {
         }
     }
     
+    // MARK: - Vertex Positions
+    
     /// The `MDLVertexAttribute` that contains the offset variable used for unpacking the position buffer
     private var positionAttribute: MDLVertexAttribute? {
         return vertexDescriptorAttributes.first {
@@ -67,6 +69,53 @@ public extension MDLMesh {
         return result
     }
     
+    // MARK: - UV Coordinates
+    
+    /// The `MDLVertexAttribute` that contains the offset variable used for unpacking the UV coordinate buffer
+    private var textureCoordinateAttribute: MDLVertexAttribute? {
+        return vertexDescriptorAttributes.first {
+            $0.name == MDLVertexAttributeTextureCoordinate
+        }
+    }
+    
+    /// The `MDLMeshBuffer` that contains the buffer index and vertex position data
+    private var textureCoordinateBuffer: MDLMeshBuffer? {
+        guard let index = textureCoordinateAttribute?.bufferIndex else { return nil }
+        return vertexBuffers[index]
+    }
+    
+    /// The `MDLVertexBufferLayout` which is used to get the stride
+    private var textureCoordinateBufferLayout: MDLVertexBufferLayout? {
+        guard let index = textureCoordinateAttribute?.bufferIndex else { return nil }
+        return vertexDescriptor.layouts[index] as? MDLVertexBufferLayout
+    }
+    
+    var textureCoordinates: [SIMD2<Float>] {
+        // Find the attribute for texture coordinates
+        guard let textureCoordinateAttribute,
+                let textureCoordinateBuffer,
+                let textureCoordinateBufferLayout else {
+            return []
+        }
+
+        let stride = textureCoordinateBufferLayout.stride
+        let rawPointer = textureCoordinateBuffer.map().bytes
+        let vertexCount = textureCoordinateBuffer.length / stride
+        let offset = textureCoordinateAttribute.offset
+        
+        var result = [SIMD2<Float>]()
+        for i in 0..<vertexCount {
+            let vertexStart = rawPointer.advanced(by: i * stride)
+            let uvStart = vertexStart.advanced(by: offset)
+            let floatPointer = uvStart.assumingMemoryBound(to: Float.self)
+            result.append(.init(floatPointer[0], floatPointer[1]))
+        }
+        return result
+    }
+    
+    // MARK: - Normals
+    
+    // MARK: - Submesh
     
     /// An array of `MDLSubmesh` unpacked from the `submeshes` variable which is a `NSMutableArray` in the built-in `MDLMesh`
     var submeshArray: [MDLSubmesh] {
@@ -87,11 +136,16 @@ public extension MDLMesh {
         
         // Get the computed property first, so it isn't computed multiple times inside the map
         let positions = positions
-        
+        let textureCoordinates = textureCoordinates
+        guard !positions.isEmpty else { return [] }
+
         // Map the mesh descriptors from the vertex positions, and primitives in the submesh
         return submeshArray.map { submesh in
             var descriptor = MeshDescriptor(name: name)
             descriptor.positions = .init(positions)
+            if textureCoordinates.count == positions.count {
+                descriptor.textureCoordinates = .init(textureCoordinates)
+            }
             descriptor.primitives = submesh.primitives
             return descriptor
         }
