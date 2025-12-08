@@ -40,6 +40,11 @@ extension MDLMaterial {
             // Successfully obtained the resource, return it
             return resource
         }
+        print("Failed to get textureResource")
+        print(" - property", property(with: mdlSemantic))
+        print(" - sampler", property(with: mdlSemantic)?.textureSamplerValue)
+        print(" - texture", property(with: mdlSemantic)?.textureSamplerValue?.texture)
+        print(" - image", property(with: mdlSemantic)?.textureSamplerValue?.texture?.imageFromTexture()?.takeUnretainedValue())
         return nil
     }
     
