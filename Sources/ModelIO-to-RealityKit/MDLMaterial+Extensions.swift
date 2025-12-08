@@ -26,26 +26,43 @@ extension MDLMaterial {
         return nil
     }
     
+    /// Get the texture sampler for this material and semantic, if available
+    func getTextureSampler(mdlSemantic: MDLMaterialSemantic) -> MDLTextureSampler? {
+        guard let materialProperty = property(with: mdlSemantic) else {
+            print("Failed to get property(with: \(mdlSemantic))")
+            return nil
+        }
+        return materialProperty.textureSamplerValue
+    }
+    
+    /// Get the `MDLTexture` for this material and semantic, if available
+    func getTexture(mdlSemantic: MDLMaterialSemantic) -> MDLTexture? {
+        guard let sampler = getTextureSampler(mdlSemantic: mdlSemantic) else {
+            print("Failed to getTextureSampler(mdlSemantic: \(mdlSemantic)")
+            return nil
+        }
+        return sampler.texture
+    }
+    
+    /// Get the `CGImage` for this material and semantic, if available
+    func getImage(mdlSemantic: MDLMaterialSemantic) -> CGImage? {
+        guard let texture = getTexture(mdlSemantic: mdlSemantic) else {
+            print("Failed to getTexture(mdlSemantic: \(mdlSemantic)")
+            return nil
+        }
+        return texture.imageFromTexture()?.takeRetainedValue()
+    }
+    
     /// Get a texture resource representing an image, using ModelIO semantic to unpack from the `material.propery`, and RealityKit semantic to initialize the `TextureResource`.
     @MainActor func getTextureResource(
         mdlSemantic: MDLMaterialSemantic,
         rkSemantic: TextureResource.Semantic
     ) -> TextureResource? {
-        if let property: MDLMaterialProperty = property(with: mdlSemantic),
-            let sampler: MDLTextureSampler = property.textureSamplerValue,
-            let texture: MDLTexture = sampler.texture,
-            let image: CGImage = texture.imageFromTexture()?.takeRetainedValue(),
-            let resource = try? TextureResource(image: image, options: .init(semantic: rkSemantic)) {
-            
-            // Successfully obtained the resource, return it
-            return resource
+        guard let image = getImage(mdlSemantic: mdlSemantic) else {
+            print("Failed to getImage(mdlSemantic: \(mdlSemantic)")
+            return nil
         }
-        print("Failed to get textureResource")
-        print(" - property", property(with: mdlSemantic))
-        print(" - sampler", property(with: mdlSemantic)?.textureSamplerValue)
-        print(" - texture", property(with: mdlSemantic)?.textureSamplerValue?.texture)
-        print(" - image", property(with: mdlSemantic)?.textureSamplerValue?.texture?.imageFromTexture()?.takeUnretainedValue())
-        return nil
+        return try? TextureResource(image: image, options: .init(semantic: rkSemantic))
     }
     
     
