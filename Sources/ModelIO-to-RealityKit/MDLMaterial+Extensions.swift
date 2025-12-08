@@ -13,7 +13,7 @@ import UIKit
 extension MDLMaterial {
     
     /// Extract the `UIColor` representation for this material given the specified ModelIO semantic
-    @MainActor func getColor(mdlSemantic: MDLMaterialSemantic) -> UIColor? {
+    func getColor(mdlSemantic: MDLMaterialSemantic) -> UIColor? {
         if let property: MDLMaterialProperty = property(with: mdlSemantic) {
             let color = property.float4Value
             return .init(
@@ -27,12 +27,12 @@ extension MDLMaterial {
     }
     
     /// Get the texture sampler for this material and semantic, if available
-    @MainActor func getTextureSampler(mdlSemantic: MDLMaterialSemantic) -> MDLTextureSampler? {
+    func getTextureSampler(mdlSemantic: MDLMaterialSemantic) -> MDLTextureSampler? {
         guard let materialProperty = property(with: mdlSemantic) else {
             print("Failed to get property(with: \(mdlSemantic))")
             return nil
         }
-        guard let sampler = getTextureSampler(mdlSemantic: mdlSemantic) else {
+        guard let sampler = materialProperty.textureSamplerValue else {
             print("Failed to getTextureSampler(mdlSemantic: \(mdlSemantic))")
             return nil
         }
@@ -40,7 +40,7 @@ extension MDLMaterial {
     }
     
     /// Get the `MDLTexture` for this material and semantic, if available
-    @MainActor func getTexture(mdlSemantic: MDLMaterialSemantic) -> MDLTexture? {
+    func getTexture(mdlSemantic: MDLMaterialSemantic) -> MDLTexture? {
         guard let sampler = getTextureSampler(mdlSemantic: mdlSemantic) else {
             return nil
         }
@@ -52,7 +52,7 @@ extension MDLMaterial {
     }
     
     /// Get the `CGImage` for this material and semantic, if available
-    @MainActor func getImage(mdlSemantic: MDLMaterialSemantic) -> CGImage? {
+    func getImage(mdlSemantic: MDLMaterialSemantic) -> CGImage? {
         guard let texture = getTexture(mdlSemantic: mdlSemantic) else {
             return nil
         }
