@@ -17,6 +17,6 @@ import Foundation
     let entity = await ModelEntity.fromMDLAsset(url: url)
     let minBounds = await entity?.model?.mesh.bounds.min
     let maxBounds = await entity?.model?.mesh.bounds.max
-    #expect(minBounds == SIMD3<Float>(-0.3, -0.4, -0.1))
-    #expect(maxBounds == SIMD3<Float>(0.3, 0.4, 0.1))
+    #expect(minBounds == SIMD3<Float>(-0.3, -0.4, -0.1), "minBounds do not match expectation")
+    #expect(maxBounds == SIMD3<Float>(0.3, 0.4, 0.1), "maxBounds do not match expectation")
 }
