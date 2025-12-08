@@ -19,6 +19,36 @@ public extension MDLMesh {
         }
     }
     
+    /// Unpacks the array of `SIMD3<Float>` given a bufffer, layout, and attribute
+    private func getFloat3Array(
+        buffer: MDLMeshBuffer,
+        layout: MDLVertexBufferLayout,
+        attribute: MDLVertexAttribute
+    ) -> [SIMD3<Float>] {
+        // Get the data that informs how to unpack the buffer
+        let stride = layout.stride
+        let rawPointer = buffer.map().bytes
+        let vertexCount = buffer.length / stride
+        let offset = attribute.offset
+
+        var result = [SIMD3<Float>]()
+        for i in 0 ..< vertexCount  {
+            // Get the pointer associated with this vertex
+            let vertexStart = rawPointer.advanced(by: i * stride)
+            let positionStart = vertexStart.advanced(by: offset)
+            let floatPointer = positionStart.assumingMemoryBound(to: Float.self)
+            
+            // Unpack this vertex position into the SIMD3<Float>
+            result.append(.init(
+                x: floatPointer[0],
+                y: floatPointer[1],
+                z: floatPointer[2]
+            ))
+        }
+        
+        return result
+    }
+    
     // MARK: - Vertex Positions
     
     /// The `MDLVertexAttribute` that contains the offset variable used for unpacking the position buffer
@@ -45,28 +75,7 @@ public extension MDLMesh {
         guard let positionBuffer, let vertexBufferLayout, let positionAttribute else {
             return []
         }
-        // Get the data that informs how to unpack the buffer
-        let stride = vertexBufferLayout.stride
-        let rawPointer = positionBuffer.map().bytes
-        let vertexCount = positionBuffer.length / stride
-        let offset = positionAttribute.offset
-
-        var result = [SIMD3<Float>]()
-        for i in 0 ..< vertexCount  {
-            // Get the pointer associated with this vertex
-            let vertexStart = rawPointer.advanced(by: i * stride)
-            let positionStart = vertexStart.advanced(by: offset)
-            let floatPointer = positionStart.assumingMemoryBound(to: Float.self)
-            
-            // Unpack this vertex position into the SIMD3<Float>
-            result.append(.init(
-                x: floatPointer[0],
-                y: floatPointer[1],
-                z: floatPointer[2]
-            ))
-        }
-        
-        return result
+        return getFloat3Array(buffer: positionBuffer, layout: vertexBufferLayout, attribute: positionAttribute)
     }
     
     // MARK: - UV Coordinates
@@ -115,6 +124,33 @@ public extension MDLMesh {
     
     // MARK: - Normals
     
+    /// The `MDLVertexAttribute` that contains the offset variable used for unpacking the normal buffer
+    private var normalAttribute: MDLVertexAttribute? {
+        return vertexDescriptorAttributes.first {
+            $0.name == MDLVertexAttributeNormal
+        }
+    }
+    
+    /// The `MDLMeshBuffer` that contains the buffer index and vertex normal data
+    private var normalBuffer: MDLMeshBuffer? {
+        guard let index = normalAttribute?.bufferIndex else { return nil }
+        return vertexBuffers[index]
+    }
+    
+    /// The `MDLVertexBufferLayout` which is used to get the stride
+    private var normalBufferLayout: MDLVertexBufferLayout? {
+        guard let index = normalAttribute?.bufferIndex else { return nil }
+        return vertexDescriptor.layouts[index] as? MDLVertexBufferLayout
+    }
+    
+    /// The array of 3D vertex positions representing normals at the vertices in the mesh
+    var normals: [SIMD3<Float>] {
+        guard let normalBuffer, let normalBufferLayout, let normalAttribute else {
+            return []
+        }
+        return getFloat3Array(buffer: normalBuffer, layout: normalBufferLayout, attribute: normalAttribute)
+    }
+    
     // MARK: - Submesh
     
     /// An array of `MDLSubmesh` unpacked from the `submeshes` variable which is a `NSMutableArray` in the built-in `MDLMesh`
@@ -134,18 +170,27 @@ public extension MDLMesh {
     /// An array of `MeshDescriptor` derived from the `positions` array and primitive indices contained in the `submeshes`
     @MainActor var descriptors: [MeshDescriptor] {
         
-        // Get the computed property first, so it isn't computed multiple times inside the map
+        // Get the computed properties first, so they aren't computed multiple times inside the map
         let positions = positions
         let textureCoordinates = textureCoordinates
+        let normals = normals
         guard !positions.isEmpty else { return [] }
 
-        // Map the mesh descriptors from the vertex positions, and primitives in the submesh
+        // Map the mesh descriptors from the submeshes
         return submeshArray.map { submesh in
+            // Initialize the descriptor with positions
             var descriptor = MeshDescriptor(name: name)
             descriptor.positions = .init(positions)
+            
+            // Make sure the coordinates and normals are dimensionally consistent with the positions
             if textureCoordinates.count == positions.count {
                 descriptor.textureCoordinates = .init(textureCoordinates)
             }
+            if normals.count == positions.count {
+                descriptor.normals = .init(normals)
+            }
+            
+            // Add primitives from the submesh
             descriptor.primitives = submesh.primitives
             return descriptor
         }
