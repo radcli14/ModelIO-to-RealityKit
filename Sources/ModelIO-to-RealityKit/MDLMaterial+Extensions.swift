@@ -8,20 +8,18 @@
 import Foundation
 import ModelIO
 import RealityKit
-import UIKit
 
 extension MDLMaterial {
     
     /// Extract the `UIColor` representation for this material given the specified ModelIO semantic
-    func getColor(mdlSemantic: MDLMaterialSemantic) -> UIColor? {
+    func getColor(mdlSemantic: MDLMaterialSemantic) -> [CGFloat]? {
         if let property: MDLMaterialProperty = property(with: mdlSemantic) {
             let color = property.float4Value
-            return .init(
-                red: CGFloat(color[0]),
-                green: CGFloat(color[1]),
-                blue: CGFloat(color[2]),
-                alpha: CGFloat(color[3])
-            )
+            var result = [CGFloat](repeating: 0, count: 4)
+            for k in 0..<4 {
+                result[k] = CGFloat(color[k])
+            }
+            return result
         }
         return nil
     }
@@ -75,7 +73,7 @@ extension MDLMaterial {
             print("Failed to getTextureResource(mdlSemantic: \(mdlSemantic), rkSemantic: \(rkSemantic)")
             return nil
         }
-        return nil
+        return resource
     }
     
     
@@ -87,7 +85,7 @@ extension MDLMaterial {
             
         // Otherwise check for the constant color
         } else if let color = getColor(mdlSemantic: .baseColor) {
-            return .init(tint: color)
+            return .init(tint: .init(red: color[0], green: color[1], blue: color[2], alpha: color[3]))
         }
         return nil
     }

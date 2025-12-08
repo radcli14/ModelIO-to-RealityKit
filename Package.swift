@@ -24,7 +24,14 @@ let package = Package(
         ),
         .testTarget(
             name: "ModelIO-to-RealityKitTests",
-            dependencies: ["ModelIO-to-RealityKit"]
+            dependencies: ["ModelIO-to-RealityKit"],
+            resources: [
+                .process("xyzBlock.obj"),
+                .process("xyzBlock.mtl"),
+                .process("Diffuse.png"),
+                .process("normal.png"),
+                .process("roughness.png")
+            ]
         ),
     ]
 )
