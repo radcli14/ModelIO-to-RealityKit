@@ -32,7 +32,7 @@ import RealityKit
     var materials: [any RealityKit.Material] {
         meshes.flatMap { mesh in
             mesh.submeshArray.compactMap { submesh in
-                submesh.pbrMaterial
+                submesh.material?.pbr
             }
         }
     }
