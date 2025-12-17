@@ -55,3 +55,61 @@ struct ContentView: View {
 ```
 
 ![Screenshot](screenshot.png)
+
+
+## Data Structure
+
+```mermaid
+classDiagram
+    note for MDLAsset "ModelIO"
+    note for ModelEntity "RealityKit"
+
+    MDLAsset ..> MDLMesh : object(at i) as? MDLMesh
+    MDLMesh ..> MDLSubmesh
+    MDLSubmesh ..> MDLMaterial
+    class MDLAsset {
+        +Int count
+        +init(url: URL)
+        +MDLObject object(at: Int) 
+    }
+
+    class MDLMesh {
+        +MDLVertexDescriptor vertexDescriptor 
+        +[any MDLMeshBuffer] vertexBuffers
+        +NSMutableArray submeshes 
+    }
+
+    class MDLSubmesh {
+        +any MDLMeshBuffer indexBuffer
+        +MDLMaterial? material
+    }
+
+    class MDLMaterial {
+
+    }
+
+    %%MDLAsset ..> ModelEntity : "getModelEntity()"
+    ModelEntity ..> MeshResource
+    ModelEntity ..> Material
+    MeshResource ..> MeshDescriptor
+    class ModelEntity {
+        +init(mesh: MeshResource, materials: [any Material])
+    }
+
+    class MeshResource {
+        +init(from: [MeshDescriptor])
+    }
+
+    class MeshDescriptor {
+        +String name
+        +[SIMD3] positions
+        +[SIMD3] normals
+        +[SIMD2] textureCoordinates
+        +primitives
+        +init(name: String)
+    }
+
+    class Material {
+        
+    }
+```
