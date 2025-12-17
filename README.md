@@ -85,12 +85,11 @@ classDiagram
     }
 
     class MDLMaterial {
-
+        +MDLMaterialProperty property(with: MDLMaterialSemantic)
     }
 
-    %%MDLAsset ..> ModelEntity : "getModelEntity()"
     ModelEntity ..> MeshResource
-    ModelEntity ..> Material
+    ModelEntity ..> PhysicallyBasedMaterial
     MeshResource ..> MeshDescriptor
     class ModelEntity {
         +init(mesh: MeshResource, materials: [any Material])
@@ -109,7 +108,11 @@ classDiagram
         +init(name: String)
     }
 
-    class Material {
+    class PhysicallyBasedMaterial {
         
     }
+
+    MDLMesh ..> MeshDescriptor : positions, normals, textureCoordinates
+    MDLSubmesh ..> MeshDescriptor : primitives
+    MDLMaterial ..> PhysicallyBasedMaterial : colors, textures
 ```
