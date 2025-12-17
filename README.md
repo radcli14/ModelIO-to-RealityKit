@@ -59,6 +59,23 @@ struct ContentView: View {
 
 ## Data Structure
 
+To understand how we might convert a ModelIO-compatible data format into a RealityKit entity, we may refer to the class diagram below.
+In this diagram, the key properties and functions required for this conversion are highlighted inside of their respective classes; this is not, however, a complete representation of the class.
+
+Consider the initializer for a `ModelEntity` where we provide the `mesh` and `materials` arguments.
+The former is in the form of a `MeshResource`.
+This type holds the geometric representation of the mesh in an array of `MeshDescriptor`.
+There are several different RealityKit Material types, but for our case, the `PhysicallyBasedMaterial` is sufficient.
+
+On the other side, we find the `MDLAsset` type from ModelIO, which can be initialized from a `URL` of a 3D model file.
+Geometry for the `MeshDescriptor` can be unpacked from `MDLMesh` and `MDLSubmesh` children of the `MDLAsset`.
+The former contains vertex data, meaning the positions, normals, and texture (i.e. UV) coordinates of each vertex, in a buffer.
+The latter contains mesh primitives, meaning indices associated with each face of the mesh.
+
+The `MDLSubmesh` also holds material data, meaning color or image textures for that section of the mesh (for many objects, there is only a single submesh).
+This data can be unpacked from the `material` variable, which itself contains various `MDLMaterialProperty` instances.
+Each of these can be converted to a form required by similar properties of the RealityKit `PhysicallyBasedMaterial`.
+
 ```mermaid
 classDiagram
     note for MDLAsset "ModelIO"
@@ -67,6 +84,8 @@ classDiagram
     MDLAsset ..> MDLMesh : object(at i) as? MDLMesh
     MDLMesh ..> MDLSubmesh
     MDLSubmesh ..> MDLMaterial
+    MDLMaterial ..> MDLMaterialProperty
+
     class MDLAsset {
         +Int count
         +init(url: URL)
@@ -88,6 +107,12 @@ classDiagram
         +MDLMaterialProperty property(with: MDLMaterialSemantic)
     }
 
+    class MDLMaterialProperty {
+        +vector_float4 float4value
+        +MDLTextureSampler textureSamplerValue
+        +URL urlValue
+    }
+
     ModelEntity ..> MeshResource
     ModelEntity ..> PhysicallyBasedMaterial
     MeshResource ..> MeshDescriptor
@@ -101,18 +126,21 @@ classDiagram
 
     class MeshDescriptor {
         +String name
-        +[SIMD3] positions
-        +[SIMD3] normals
-        +[SIMD2] textureCoordinates
-        +primitives
+        +MeshBuffers.Positions positions
+        +MeshBuffers.Normals? normals
+        +MeshBuffers.TextureCoordinates? textureCoordinates
+        +MeshDescriptor.Primitives? primitives
         +init(name: String)
     }
 
     class PhysicallyBasedMaterial {
-        
+        +PhysicallyBasedMaterial.BaseColor baseColor
+        +PhysicallyBasedMaterial.Normal normal
+        +PhysicallyBasedMaterial.Roughness roughness
+        +PhysicallyBasedMaterial.Metallic metallic 
     }
 
     MDLMesh ..> MeshDescriptor : positions, normals, textureCoordinates
     MDLSubmesh ..> MeshDescriptor : primitives
-    MDLMaterial ..> PhysicallyBasedMaterial : colors, textures
+    MDLMaterialProperty ..> PhysicallyBasedMaterial : color or texture
 ```
