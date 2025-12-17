@@ -13,65 +13,27 @@ extension MDLMaterial {
     
     /// Extract the `UIColor` representation for this material given the specified ModelIO semantic
     func getColor(mdlSemantic: MDLMaterialSemantic) -> [CGFloat]? {
-        if let property: MDLMaterialProperty = property(with: mdlSemantic) {
-            let color = property.float4Value
-            var result = [CGFloat](repeating: 0, count: 4)
-            for k in 0..<4 {
-                result[k] = CGFloat(color[k])
-            }
-            return result
-        }
-        return nil
+        property(with: mdlSemantic)?.cgColor
     }
     
     /// Get the texture sampler for this material and semantic, if available
     func getTextureSampler(mdlSemantic: MDLMaterialSemantic) -> MDLTextureSampler? {
-        guard let materialProperty = property(with: mdlSemantic) else {
-            //print("Failed to get property(with: \(mdlSemantic))")
-            return nil
-        }
-        guard let sampler = materialProperty.textureSamplerValue else {
-            //print("Failed to getTextureSampler(mdlSemantic: \(mdlSemantic))")
-            return nil
-        }
-        return sampler
+        property(with: mdlSemantic)?.textureSamplerValue
     }
     
     /// Get the URL of a file (typically an image) associated with this property
     func getUrl(mdlSemantic: MDLMaterialSemantic) -> URL? {
-        guard let materialProperty = property(with: mdlSemantic) else {
-            //print("Failed to get property(with: \(mdlSemantic))")
-            return nil
-        }
-        guard let url = materialProperty.urlValue else {
-            //print("Failed to getUrl(with: \(mdlSemantic))")
-            return nil
-        }
-        return url
+        property(with: mdlSemantic)?.urlValue
     }
     
     /// Get the `MDLTexture` for this material and semantic, if available
     func getTexture(mdlSemantic: MDLMaterialSemantic) -> MDLTexture? {
-        guard let sampler = getTextureSampler(mdlSemantic: mdlSemantic) else {
-            return nil
-        }
-        guard let texture = sampler.texture else {
-            //print("Failed to getTexture(mdlSemantic: \(mdlSemantic))")
-            return nil
-        }
-        return texture
+        property(with: mdlSemantic)?.texture
     }
     
     /// Get the `CGImage` for this material and semantic, if available
     func getImage(mdlSemantic: MDLMaterialSemantic) -> CGImage? {
-        guard let texture = getTexture(mdlSemantic: mdlSemantic) else {
-            return nil
-        }
-        guard let image = texture.imageFromTexture()?.takeRetainedValue() else {
-            //print("Failed to getImage(mdlSemantic: \(mdlSemantic))")
-            return nil
-        }
-        return image
+        property(with: mdlSemantic)?.cgImage
     }
     
     /// Get a texture resource representing an image, using ModelIO semantic to unpack from the `material.propery`, and RealityKit semantic to initialize the `TextureResource`.
@@ -79,37 +41,22 @@ extension MDLMaterial {
         mdlSemantic: MDLMaterialSemantic,
         rkSemantic: TextureResource.Semantic
     ) async -> TextureResource? {
-        
-        // First try to load from a URL if it exists
-        if let url = getUrl(mdlSemantic: mdlSemantic),
-            let resource = try? await TextureResource(contentsOf: url) {
-            print("Succeeded in getting a resource", resource, "from", url.lastPathComponent)
-            return resource
-        }
-        
-        // Else try from the texture sampler, though this never works
-        guard let image = getImage(mdlSemantic: mdlSemantic) else {
-            return nil
-        }
-        guard let resource = try? await TextureResource(image: image, options: .init(semantic: rkSemantic)) else {
-            //print("Failed to getTextureResource(mdlSemantic: \(mdlSemantic), rkSemantic: \(rkSemantic)")
-            return nil
-        }
-        return resource
+        await property(with: mdlSemantic)?.getTextureResource(rkSemantic: rkSemantic)
     }
     
     
     /// Attempts to extract the Base Color, prioritizing texture, then numeric value.
     @MainActor func getPbrBaseColor() async -> PhysicallyBasedMaterial.BaseColor? {
+        guard let baseColorProperty = property(with: .baseColor) else { return nil }
+        
         // Check for a texture map (file reference), or a numeric value.
-        if let resource = await getTextureResource(mdlSemantic: .baseColor, rkSemantic: .color) {
+        if let resource = await baseColorProperty.getTextureResource(rkSemantic: .color) {
             return .init(texture: .init(resource))
-            
-        // Otherwise check for the constant color
-        } else if let color = getColor(mdlSemantic: .baseColor) {
-            return .init(tint: .init(red: color[0], green: color[1], blue: color[2], alpha: color[3]))
         }
-        return nil
+        
+        // Otherwise return the constant color
+        let color = baseColorProperty.cgColor
+        return .init(tint: .init(red: color[0], green: color[1], blue: color[2], alpha: color[3]))
     }
     
     /// Create the PBR material's normal image
@@ -125,9 +72,9 @@ extension MDLMaterial {
         // TODO: add some better logic for when to use roughness vs specular, I'm using it the way I am here because it seemed lost in the Blender .obj file export
         let roughnessProperty = property(with: .roughness)
         let specularProperty = property(with: .specularExponent)
-        if let resource = await getTextureResource(mdlSemantic: .roughness, rkSemantic: .raw) {
+        if let resource = await roughnessProperty?.getTextureResource(rkSemantic: .raw) {
             return .init(texture: .init(resource))
-        } else if let resource = await getTextureResource(mdlSemantic: .specularExponent, rkSemantic: .raw) {
+        } else if let resource = await specularProperty?.getTextureResource(rkSemantic: .raw) {
             return .init(texture: .init(resource))
         } else if let value = specularProperty?.floatValue {
             return .init(floatLiteral: sqrt(2.0 / (value + 2.0)))
@@ -139,13 +86,11 @@ extension MDLMaterial {
     
     /// Create the PBR material's metallic image or float value
     @MainActor func getPbrMetallic() async -> PhysicallyBasedMaterial.Metallic? {
-        let metallicProperty = property(with: .metallic)
-        if let resource = await getTextureResource(mdlSemantic: .metallic, rkSemantic: .raw) {
+        guard let metallicProperty = property(with: .metallic) else { return nil }
+        if let resource = await metallicProperty.getTextureResource(rkSemantic: .raw) {
             return .init(texture: .init(resource))
-        } else if let value = metallicProperty?.floatValue {
-            return .init(floatLiteral: value)
         }
-        return nil
+        return .init(floatLiteral: metallicProperty.floatValue)
     }
     
     /// The `PhysicallyBasedMaterial` representation of the material included in the submesh
