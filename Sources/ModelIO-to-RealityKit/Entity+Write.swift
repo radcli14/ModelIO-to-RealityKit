@@ -126,7 +126,7 @@ enum ModelIOWriteError: Error, LocalizedError {
                         vertexBuffer: vertexBuffer,
                         vertexCount: positions.count,
                         descriptor: vertexDescriptor,
-                        submeshes: NSMutableArray(array: [submesh])
+                        submeshes: [submesh]
                     )
 
                     asset.add(mdlMesh)
@@ -134,9 +134,6 @@ enum ModelIOWriteError: Error, LocalizedError {
             }
         }
 
-        let success = asset.export(to: url)
-        guard success else {
-            throw ModelIOWriteError.exportFailed(url)
-        }
+        try asset.export(to: url)
     }
 }
