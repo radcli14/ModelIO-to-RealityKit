@@ -23,10 +23,10 @@ The package may be installed using Swift Package Manager, in XCode, as follows:g
 ## Minimal Example
 
 The simplest entry point is to use the extension `.fromMDLAsset` with a valid `URL` for a file that can be handled by ModelIO.
-That extension is `async`, and is formatted as follows:
+That extension is `async throws`, and is formatted as follows:
 
 ```swift
-ModelEntity.fromMDLAsset(url: URL)
+try await ModelEntity.fromMDLAsset(url: URL)
 ```
 
 In the example below, the project contains a Wavefront Object file named `shiny.obj` in its asset bundle.
@@ -42,9 +42,13 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             RealityView { content in
-                if let url = Bundle.main.url(forResource: "shiny", withExtension: "obj"),
-                   let entity = await ModelEntity.fromMDLAsset(url: url) {
-                    content.add(entity)
+                if let url = Bundle.main.url(forResource: "shiny", withExtension: "obj") {
+                    do {
+                        let entity = try await ModelEntity.fromMDLAsset(url: url)
+                        content.add(entity)
+                    } catch {
+                        print("Failed to load entity: \(error.localizedDescription)")
+                    }
                 }
             }
             .realityViewCameraControls(.orbit)

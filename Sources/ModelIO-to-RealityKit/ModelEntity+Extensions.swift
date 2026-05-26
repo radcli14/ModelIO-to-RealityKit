@@ -12,46 +12,25 @@ import RealityKit
 public extension ModelEntity {
     /// Create a `ModelEntity` from a `URL` for a file that is of a type supported by `ModelIO`
     @MainActor
-    static func fromMDLAsset(url: URL) async -> ModelEntity? {
-        // Load the asset using Model I/O.
+    static func fromMDLAsset(url: URL) async throws -> ModelEntity {
         let asset = MDLAsset(url: url)
-        
-        // Asynchronously get its `ModelEntity`
-        return await asset.getModelEntity()
+        return try await asset.getModelEntity()
     }
-    
-    /// Load ModelEntity from Data instead of URL
+
+    /// Create a `ModelEntity` from raw file data in a format supported by `ModelIO`
     /// - Parameters:
     ///   - data: The raw file data (STL, OBJ, PLY, or ABC format)
-    ///   - format: File format extension ("stl", "obj", "ply", or "abc")
-    /// - Returns: ModelEntity if successful, nil otherwise
+    ///   - format: File format extension (e.g. "stl", "obj", "ply", "abc")
     @MainActor
     static func fromMDLAsset(
         data: Data,
         format: String
-    ) async -> ModelEntity? {
-        // Create temporary file URL
+    ) async throws -> ModelEntity {
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension(format)
-
-        do {
-            // Write data to temporary file
-            try data.write(to: tempURL)
-
-            // Load using existing URL-based method
-            let entity = await ModelEntity.fromMDLAsset(url: tempURL)
-
-            // Clean up temporary file
-            try? FileManager.default.removeItem(at: tempURL)
-
-            return entity
-        } catch {
-            print("Error in fromMDLAsset(data:format:): \(error.localizedDescription)")
-            
-            // Cleanup on error
-            try? FileManager.default.removeItem(at: tempURL)
-            return nil
-        }
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try data.write(to: tempURL)
+        return try await ModelEntity.fromMDLAsset(url: tempURL)
     }
 }
