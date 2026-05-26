@@ -63,3 +63,33 @@ import ModelIO
     let asset = MDLAsset(url: tmpURL)
     #expect(asset.count > 0, "ABC asset has no objects")
 }
+
+@Test @MainActor func testWriteUSDZ() async throws {
+    let mesh = MeshResource.generateBox(size: 0.1)
+    let entity = ModelEntity(mesh: mesh)
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("usdz")
+    defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+    try await entity.writeMDLAsset(to: tmpURL)
+
+    #expect(FileManager.default.fileExists(atPath: tmpURL.path), "USDZ file was not created at \(tmpURL.path)")
+    let asset = MDLAsset(url: tmpURL)
+    #expect(asset.count > 0, "USDZ asset has no objects")
+}
+
+@Test @MainActor func testWriteReadRoundtripUSDZ() async throws {
+    let mesh = MeshResource.generateBox(size: 0.1)
+    let entity = ModelEntity(mesh: mesh)
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("usdz")
+    defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+    try await entity.writeMDLAsset(to: tmpURL)
+
+    let loaded = try await Entity(contentsOf: tmpURL)
+    let extents = loaded.visualBounds(relativeTo: nil).extents
+    #expect(extents.x > 0 && extents.y > 0 && extents.z > 0, "Loaded USDZ mesh has zero extents")
+}

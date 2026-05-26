@@ -134,6 +134,75 @@ enum ModelIOWriteError: Error, LocalizedError {
             }
         }
 
-        try asset.export(to: url)
+        if url.pathExtension.lowercased() == "usdz" {
+            try packageAsUSDZ(asset: asset, to: url)
+        } else {
+            try asset.export(to: url)
+        }
+    }
+}
+
+/// Exports the MDLAsset to a USDA file and packages it as a USDZ ZIP archive.
+/// USDZ files are uncompressed (stored) ZIP archives; MDLAsset handles the USD layer export.
+private func packageAsUSDZ(asset: MDLAsset, to url: URL) throws {
+    let tempUSDA = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("usda")
+    defer { try? FileManager.default.removeItem(at: tempUSDA) }
+
+    try asset.export(to: tempUSDA)
+    let fileData = try Data(contentsOf: tempUSDA)
+    let filenameBytes = Data("model.usda".utf8)
+
+    let crc = zipCRC32(fileData)
+    let size = UInt32(fileData.count)
+    var zip = Data()
+
+    // Local file header
+    let localHeaderOffset = UInt32(0)
+    zip.appendLE(UInt32(0x04034b50)); zip.appendLE(UInt16(20)); zip.appendLE(UInt16(0))
+    zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0))
+    zip.appendLE(crc); zip.appendLE(size); zip.appendLE(size)
+    zip.appendLE(UInt16(filenameBytes.count)); zip.appendLE(UInt16(0))
+    zip.append(filenameBytes)
+    zip.append(fileData)
+
+    // Central directory entry
+    let centralDirOffset = UInt32(zip.count)
+    zip.appendLE(UInt32(0x02014b50)); zip.appendLE(UInt16(20)); zip.appendLE(UInt16(20))
+    zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0))
+    zip.appendLE(crc); zip.appendLE(size); zip.appendLE(size)
+    zip.appendLE(UInt16(filenameBytes.count)); zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0))
+    zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0)); zip.appendLE(UInt32(0))
+    zip.appendLE(localHeaderOffset)
+    zip.append(filenameBytes)
+
+    let centralDirSize = UInt32(zip.count) - centralDirOffset
+
+    // End of central directory record
+    zip.appendLE(UInt32(0x06054b50)); zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0))
+    zip.appendLE(UInt16(1)); zip.appendLE(UInt16(1))
+    zip.appendLE(centralDirSize); zip.appendLE(centralDirOffset); zip.appendLE(UInt16(0))
+
+    try zip.write(to: url)
+}
+
+/// CRC-32 using the standard IEEE 802.3 polynomial, required by the ZIP format.
+private func zipCRC32(_ data: Data) -> UInt32 {
+    var table = [UInt32](repeating: 0, count: 256)
+    for i in 0..<256 {
+        var c = UInt32(i)
+        for _ in 0..<8 { c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1 }
+        table[i] = c
+    }
+    return data.reduce(UInt32(0xFFFFFFFF)) {
+        table[Int(($0 ^ UInt32($1)) & 0xFF)] ^ ($0 >> 8)
+    } ^ 0xFFFFFFFF
+}
+
+private extension Data {
+    mutating func appendLE<T: FixedWidthInteger>(_ value: T) {
+        var v = value.littleEndian
+        append(Data(bytes: &v, count: MemoryLayout<T>.size))
     }
 }
