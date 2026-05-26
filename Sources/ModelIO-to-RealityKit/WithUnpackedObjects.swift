@@ -13,9 +13,14 @@ public protocol WithUnpackedObjects {
 }
 
 public extension WithUnpackedObjects {
-    /// The `MDLMesh` instances inside of the `objects` array
+    /// All `MDLMesh` instances in the object tree, searched recursively.
+    /// A flat search misses meshes nested under Xform/Scope nodes (e.g. USDA exports).
     var meshes: [MDLMesh] {
-        objects.compactMap { $0 as? MDLMesh }
+        objects.flatMap { object -> [MDLMesh] in
+            var found = object.meshes  // recurse into children first
+            if let mesh = object as? MDLMesh { found.insert(mesh, at: 0) }
+            return found
+        }
     }
 }
 

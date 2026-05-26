@@ -79,6 +79,37 @@ import ModelIO
     #expect(asset.count > 0, "USDZ asset has no objects")
 }
 
+@Test @MainActor func testMaterialRoundtripUSDA() async throws {
+    let mesh = MeshResource.generateBox(size: 0.1)
+    var material = PhysicallyBasedMaterial()
+    material.roughness = .init(floatLiteral: 0.3)
+    material.baseColor = .init(tint: .init(red: 1, green: 0, blue: 0, alpha: 1))
+    let entity = ModelEntity(mesh: mesh, materials: [material])
+
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("usda")
+    defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+    try await entity.writeMDLAsset(to: tmpURL)
+
+    let loaded = try await ModelEntity.fromMDLAsset(url: tmpURL)
+    let roundtripped = loaded.model?.materials.first as? PhysicallyBasedMaterial
+
+    // Roughness: written as 0.3, default is 0.5 — must be near 0.3
+    let roughness = roundtripped?.roughness.scale ?? 0.5
+    #expect(abs(roughness - 0.3) < 0.05, "roughness did not survive USDA roundtrip (got \(roughness))")
+
+    // Base color: written as red (1,0,0,1) — green channel must be near 0, not the default 1
+    var greenComponent: CGFloat = 1.0
+    #if os(macOS)
+    (roundtripped?.baseColor.tint.usingColorSpace(.sRGB) ?? roundtripped?.baseColor.tint)?.getRed(nil, green: &greenComponent, blue: nil, alpha: nil)
+    #else
+    roundtripped?.baseColor.tint.getRed(nil, green: &greenComponent, blue: nil, alpha: nil)
+    #endif
+    #expect(greenComponent < 0.1, "base color did not survive USDA roundtrip (green=\(greenComponent), expected ≈0 for red)")
+}
+
 @Test @MainActor func testWriteReadRoundtripUSDZ() async throws {
     let mesh = MeshResource.generateBox(size: 0.1)
     let entity = ModelEntity(mesh: mesh)

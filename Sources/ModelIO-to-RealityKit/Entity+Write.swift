@@ -47,6 +47,7 @@ enum ModelIOWriteError: Error, LocalizedError {
 
         for modelEntity in modelEntities {
             guard let models = modelEntity.model?.mesh.contents.models else { continue }
+            let materials = modelEntity.model?.materials ?? []
             for model in models {
                 for part in model.parts {
                     let positions = part.positions.elements
@@ -114,12 +115,16 @@ enum ModelIOWriteError: Error, LocalizedError {
                     let indexData = indexArray.withUnsafeBytes { Data($0) }
                     let indexBuffer = allocator.newBuffer(with: indexData, type: .index)
 
+                    let materialIndex = Int(part.materialIndex)
+                    let pbr = (materialIndex < materials.count ? materials[materialIndex] : materials.first) as? PhysicallyBasedMaterial
+                    let mdlMaterial = pbr.map { makeMDLMaterial(from: $0) }
+
                     let submesh = MDLSubmesh(
                         indexBuffer: indexBuffer,
                         indexCount: indexArray.count,
                         indexType: .uInt32,
                         geometryType: .triangles,
-                        material: nil
+                        material: mdlMaterial
                     )
 
                     let mdlMesh = MDLMesh(
@@ -140,6 +145,33 @@ enum ModelIOWriteError: Error, LocalizedError {
             try asset.export(to: url)
         }
     }
+}
+
+/// Builds an MDLMaterial from a PhysicallyBasedMaterial's scalar properties.
+/// Normal texture export is not yet supported because TextureResource has no direct
+/// pixel-extraction path without a full Metal pipeline setup.
+private func makeMDLMaterial(from pbr: PhysicallyBasedMaterial) -> MDLMaterial {
+    let mdl = MDLMaterial(name: "material", scatteringFunction: MDLPhysicallyPlausibleScatteringFunction())
+
+    var r: CGFloat = 1, g: CGFloat = 1, b: CGFloat = 1, a: CGFloat = 1
+    #if os(macOS)
+    (pbr.baseColor.tint.usingColorSpace(.sRGB) ?? pbr.baseColor.tint).getRed(&r, green: &g, blue: &b, alpha: &a)
+    #else
+    pbr.baseColor.tint.getRed(&r, green: &g, blue: &b, alpha: &a)
+    #endif
+    let colorProp = MDLMaterialProperty(name: "baseColor", semantic: .baseColor)
+    colorProp.float4Value = SIMD4<Float>(Float(r), Float(g), Float(b), Float(a))
+    mdl.setProperty(colorProp)
+
+    let roughnessProp = MDLMaterialProperty(name: "roughness", semantic: .roughness)
+    roughnessProp.floatValue = pbr.roughness.scale
+    mdl.setProperty(roughnessProp)
+
+    let metallicProp = MDLMaterialProperty(name: "metallic", semantic: .metallic)
+    metallicProp.floatValue = pbr.metallic.scale
+    mdl.setProperty(metallicProp)
+
+    return mdl
 }
 
 /// Exports the MDLAsset to a USDA file and packages it as a USDZ ZIP archive.
