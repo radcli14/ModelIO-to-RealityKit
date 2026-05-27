@@ -2,6 +2,7 @@ import Testing
 import Foundation
 import ModelIO
 @preconcurrency import RealityKit
+import GLTFKit2
 @testable import ModelIO_to_RealityKit
 
 @Test @MainActor func testWriteSTL() async throws {
@@ -123,6 +124,41 @@ import ModelIO
     let loaded = try await Entity(contentsOf: tmpURL)
     let extents = loaded.visualBounds(relativeTo: nil).extents
     #expect(extents.x > 0 && extents.y > 0 && extents.z > 0, "Loaded USDZ mesh has zero extents")
+}
+
+/// Downloads the DamagedHelmet GLB, re-exports as USDZ, reloads, and verifies that baseColor
+/// and normal textures survived the round-trip (checks for non-nil PhysicallyBasedMaterial textures).
+@Test @MainActor func testRoundTripDamagedHelmetToUSDZ() async throws {
+    let remoteURL = URL(string: "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/refs/heads/main/Models/DamagedHelmet/glTF-Binary/DamagedHelmet.glb")!
+    let (tmp, _) = try await URLSession.shared.download(from: remoteURL)
+    let glbURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("glb")
+    try FileManager.default.moveItem(at: tmp, to: glbURL)
+    defer { try? FileManager.default.removeItem(at: glbURL) }
+
+    let entity = try await GLTFRealityKitLoader.load(from: glbURL)
+
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("usdz")
+    defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+    try await entity.writeMDLAsset(to: tmpURL)
+
+    #expect(FileManager.default.fileExists(atPath: tmpURL.path), "USDZ was not created")
+
+    let loaded = try await Entity(contentsOf: tmpURL)
+
+    func firstPBR(_ e: Entity) -> PhysicallyBasedMaterial? {
+        if let m = (e as? ModelEntity)?.model?.materials.first as? PhysicallyBasedMaterial { return m }
+        for child in e.children { if let found = firstPBR(child) { return found } }
+        return nil
+    }
+
+    let mat = try #require(firstPBR(loaded), "No PhysicallyBasedMaterial found in reloaded USDZ")
+    #expect(mat.baseColor.texture != nil, "baseColor texture was not preserved in USDZ round-trip")
+    #expect(mat.normal.texture != nil, "normal texture was not preserved in USDZ round-trip")
 }
 
 @Test @MainActor func testTextureEmbeddedInUSDZ() async throws {

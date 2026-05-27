@@ -35,49 +35,50 @@ private enum TextureExportError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noMetalDevice: return "No Metal device available for texture export"
-        case .textureAllocationFailed: return "Failed to allocate MTLTexture for texture export"
-        case .blitEncoderFailed: return "Failed to create blit command encoder for texture synchronization"
-        case .imageCreationFailed: return "Failed to create CGImage from texture pixel data"
-        case .imageSaveFailed(let url): return "Failed to save texture image at \(url.lastPathComponent)"
+        case .textureAllocationFailed: return "Failed to allocate MTLTexture"
+        case .blitEncoderFailed: return "Failed to create blit encoder for managed texture sync"
+        case .imageCreationFailed: return "Failed to create CGImage from texture pixels"
+        case .imageSaveFailed(let url): return "Failed to save PNG at \(url.lastPathComponent)"
         }
     }
+}
+
+// Carries all per-material data needed for both MDLSubmesh creation and USDA patching.
+// MDLAsset.export silently drops urlValue on MDLMaterialProperty, so texture references
+// are injected into the USDA after export via patchMaterialsSection.
+private struct MaterialRecord {
+    let mdlMaterial: MDLMaterial   // placeholder used only for material binding in USD
+    let name: String               // USD prim name: "mat0", "mat1", …
+    let roughnessScale: Float
+    let metallicScale: Float
+    let baseColorTint: SIMD4<Float>
+    // USD input key → bare PNG filename (e.g. "diffuseColor" → "mat0_baseColor.png")
+    let textureFiles: [String: String]
+    var hasTextures: Bool { !textureFiles.isEmpty }
 }
 
 @MainActor public extension Entity {
 
     func writeMDLAsset(to url: URL) async throws {
-        func collectModelEntities(_ entity: Entity) -> [ModelEntity] {
-            var result: [ModelEntity] = []
-            if let modelEntity = entity as? ModelEntity {
-                result.append(modelEntity)
-            }
-            for child in entity.children {
-                result.append(contentsOf: collectModelEntities(child))
-            }
-            return result
-        }
-
         let modelEntities = collectModelEntities(self)
-        guard !modelEntities.isEmpty else {
-            throw ModelIOWriteError.noMeshesFound
-        }
+        guard !modelEntities.isEmpty else { throw ModelIOWriteError.noMeshesFound }
 
         let isUSDZ = url.pathExtension.lowercased() == "usdz"
 
-        // For USDZ, create a staging directory so textures land alongside the USDA before packaging
+        // Staging directory lets texture PNGs land alongside the USDA before USDZ packaging
         let stagingDir: URL?
         if isUSDZ {
-            let dir = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString)
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             stagingDir = dir
         } else {
             stagingDir = nil
         }
-        defer { if let dir = stagingDir { try? FileManager.default.removeItem(at: dir) } }
+        defer { if let d = stagingDir { try? FileManager.default.removeItem(at: d) } }
 
         let asset = MDLAsset()
         let allocator = MDLMeshBufferDataAllocator()
+        var materialRecords = [MaterialRecord]()
         var materialCounter = 0
 
         for modelEntity in modelEntities {
@@ -87,7 +88,6 @@ private enum TextureExportError: Error, LocalizedError {
                 for part in model.parts {
                     let positions = part.positions.elements
                     guard !positions.isEmpty else { continue }
-
                     let normals = part.normals?.elements
                     let uvs = part.textureCoordinates?.elements
                     guard let triangleIndicesBuffer = part.triangleIndices else { continue }
@@ -95,53 +95,28 @@ private enum TextureExportError: Error, LocalizedError {
 
                     // Interleaved layout: float3 position (12) + float3 normal (12) + float2 uv (8) = 32 bytes
                     let vertexDescriptor = MDLVertexDescriptor()
-
                     let posAttr = MDLVertexAttribute()
-                    posAttr.name = MDLVertexAttributePosition
-                    posAttr.format = .float3
-                    posAttr.offset = 0
-                    posAttr.bufferIndex = 0
-
+                    posAttr.name = MDLVertexAttributePosition; posAttr.format = .float3
+                    posAttr.offset = 0; posAttr.bufferIndex = 0
                     let normAttr = MDLVertexAttribute()
-                    normAttr.name = MDLVertexAttributeNormal
-                    normAttr.format = .float3
-                    normAttr.offset = 12
-                    normAttr.bufferIndex = 0
-
+                    normAttr.name = MDLVertexAttributeNormal; normAttr.format = .float3
+                    normAttr.offset = 12; normAttr.bufferIndex = 0
                     let uvAttr = MDLVertexAttribute()
-                    uvAttr.name = MDLVertexAttributeTextureCoordinate
-                    uvAttr.format = .float2
-                    uvAttr.offset = 24
-                    uvAttr.bufferIndex = 0
-
+                    uvAttr.name = MDLVertexAttributeTextureCoordinate; uvAttr.format = .float2
+                    uvAttr.offset = 24; uvAttr.bufferIndex = 0
                     vertexDescriptor.attributes = NSMutableArray(array: [posAttr, normAttr, uvAttr])
-                    let layout = MDLVertexBufferLayout()
-                    layout.stride = 32
+                    let layout = MDLVertexBufferLayout(); layout.stride = 32
                     vertexDescriptor.layouts = NSMutableArray(array: [layout])
 
                     var vertexData = Data()
                     vertexData.reserveCapacity(positions.count * 32)
-
                     for i in 0..<positions.count {
-                        let p = positions[i]
-                        var xyz = (p.x, p.y, p.z)
+                        let p = positions[i]; var xyz = (p.x, p.y, p.z)
                         withUnsafeBytes(of: &xyz) { vertexData.append(contentsOf: $0) }
-
-                        let n: SIMD3<Float>
-                        if let nArr = normals, nArr.count == positions.count {
-                            n = nArr[i]
-                        } else {
-                            n = .zero
-                        }
+                        let n: SIMD3<Float> = (normals?.count == positions.count) ? normals![i] : .zero
                         var nxyz = (n.x, n.y, n.z)
                         withUnsafeBytes(of: &nxyz) { vertexData.append(contentsOf: $0) }
-
-                        let uv: SIMD2<Float>
-                        if let uvArr = uvs, uvArr.count == positions.count {
-                            uv = uvArr[i]
-                        } else {
-                            uv = .zero
-                        }
+                        let uv: SIMD2<Float> = (uvs?.count == positions.count) ? uvs![i] : .zero
                         var uvxy = (uv.x, uv.y)
                         withUnsafeBytes(of: &uvxy) { vertexData.append(contentsOf: $0) }
                     }
@@ -150,26 +125,25 @@ private enum TextureExportError: Error, LocalizedError {
                     let indexData = indexArray.withUnsafeBytes { Data($0) }
                     let indexBuffer = allocator.newBuffer(with: indexData, type: .index)
 
-                    let materialIndex = Int(part.materialIndex)
-                    let pbr = (materialIndex < materials.count ? materials[materialIndex] : materials.first) as? PhysicallyBasedMaterial
-                    let mdlMaterial = try pbr.map { try makeMDLMaterial(from: $0, textureDir: stagingDir, index: materialCounter) }
+                    let matIdx = Int(part.materialIndex)
+                    let pbr = (matIdx < materials.count ? materials[matIdx] : materials.first) as? PhysicallyBasedMaterial
+                    let record = try pbr.map { try makeMatRecord(from: $0, textureDir: stagingDir, index: materialCounter) }
                     materialCounter += 1
+                    if let r = record { materialRecords.append(r) }
 
                     let submesh = MDLSubmesh(
                         indexBuffer: indexBuffer,
                         indexCount: indexArray.count,
                         indexType: .uInt32,
                         geometryType: .triangles,
-                        material: mdlMaterial
+                        material: record?.mdlMaterial
                     )
-
                     let mdlMesh = MDLMesh(
                         vertexBuffer: vertexBuffer,
                         vertexCount: positions.count,
                         descriptor: vertexDescriptor,
                         submeshes: [submesh]
                     )
-
                     asset.add(mdlMesh)
                 }
             }
@@ -178,6 +152,11 @@ private enum TextureExportError: Error, LocalizedError {
         if isUSDZ {
             let usda = stagingDir!.appendingPathComponent("model.usda")
             try asset.export(to: usda)
+            // MDLAsset.export drops urlValue on MDLMaterialProperty, so texture UsdUVTexture nodes
+            // must be injected by replacing the Materials scope after the fact.
+            if materialRecords.contains(where: \.hasTextures) {
+                try patchMaterialsSection(in: usda, records: materialRecords)
+            }
             try packageAsUSDZ(stagingDir: stagingDir!, to: url)
         } else {
             try asset.export(to: url)
@@ -185,176 +164,257 @@ private enum TextureExportError: Error, LocalizedError {
     }
 }
 
-/// Copies a TextureResource to an MTLTexture, reads back the pixels, and writes a PNG to the given directory.
+@MainActor
+private func collectModelEntities(_ entity: Entity) -> [ModelEntity] {
+    var result = [ModelEntity]()
+    if let me = entity as? ModelEntity { result.append(me) }
+    for child in entity.children { result.append(contentsOf: collectModelEntities(child)) }
+    return result
+}
+
+/// Copies a TextureResource to an MTLTexture, reads pixel bytes, and writes a PNG to the directory.
 @MainActor
 private func writeTextureResource(_ resource: TextureResource, named name: String, in directory: URL) throws -> URL {
     guard let device = MTLCreateSystemDefaultDevice() else {
         throw TextureExportError.noMetalDevice
     }
-
     let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-        pixelFormat: .rgba8Unorm,
-        width: resource.width,
-        height: resource.height,
-        mipmapped: false
-    )
+        pixelFormat: .rgba8Unorm, width: resource.width, height: resource.height, mipmapped: false)
     descriptor.usage = .shaderWrite
-
     guard let mtlTexture = device.makeTexture(descriptor: descriptor) else {
         throw TextureExportError.textureAllocationFailed
     }
-
     try resource.copy(to: mtlTexture)
-
     #if os(macOS)
     if mtlTexture.storageMode == .managed {
         guard let queue = device.makeCommandQueue(),
-              let commandBuffer = queue.makeCommandBuffer(),
-              let blitEncoder = commandBuffer.makeBlitCommandEncoder()
+              let cmd = queue.makeCommandBuffer(),
+              let blit = cmd.makeBlitCommandEncoder()
         else { throw TextureExportError.blitEncoderFailed }
-        blitEncoder.synchronize(resource: mtlTexture)
-        blitEncoder.endEncoding()
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
+        blit.synchronize(resource: mtlTexture)
+        blit.endEncoding(); cmd.commit(); cmd.waitUntilCompleted()
     }
     #endif
-
     let bytesPerRow = 4 * resource.width
     var bytes = [UInt8](repeating: 0, count: resource.height * bytesPerRow)
     bytes.withUnsafeMutableBytes { ptr in
-        mtlTexture.getBytes(
-            ptr.baseAddress!,
-            bytesPerRow: bytesPerRow,
+        mtlTexture.getBytes(ptr.baseAddress!, bytesPerRow: bytesPerRow,
             from: MTLRegion(origin: MTLOrigin(), size: MTLSize(width: resource.width, height: resource.height, depth: 1)),
-            mipmapLevel: 0
-        )
+            mipmapLevel: 0)
     }
-
     let colorSpace = CGColorSpaceCreateDeviceRGB()
     guard let dataProvider = CGDataProvider(data: Data(bytes) as CFData),
           let cgImage = CGImage(
-              width: resource.width,
-              height: resource.height,
-              bitsPerComponent: 8,
-              bitsPerPixel: 32,
-              bytesPerRow: bytesPerRow,
+              width: resource.width, height: resource.height,
+              bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: bytesPerRow,
               space: colorSpace,
               bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-              provider: dataProvider,
-              decode: nil,
-              shouldInterpolate: false,
-              intent: .defaultIntent
-          )
-    else {
-        throw TextureExportError.imageCreationFailed
-    }
+              provider: dataProvider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    else { throw TextureExportError.imageCreationFailed }
 
     let destURL = directory.appendingPathComponent(name)
     guard let destination = CGImageDestinationCreateWithURL(destURL as CFURL, "public.png" as CFString, 1, nil) else {
         throw TextureExportError.imageSaveFailed(destURL)
     }
     CGImageDestinationAddImage(destination, cgImage, nil)
-    guard CGImageDestinationFinalize(destination) else {
-        throw TextureExportError.imageSaveFailed(destURL)
-    }
-
+    guard CGImageDestinationFinalize(destination) else { throw TextureExportError.imageSaveFailed(destURL) }
     return destURL
 }
 
-/// Builds an MDLMaterial from a PhysicallyBasedMaterial.
-/// When textureDir is provided, each texture property is written as a PNG and referenced by absolute URL;
-/// scalars are used as fallback for properties without textures.
+/// Builds a MaterialRecord: an MDLMaterial placeholder for mesh binding plus scalar/texture metadata
+/// used later to generate correct USD material nodes in patchMaterialsSection.
 @MainActor
-private func makeMDLMaterial(from pbr: PhysicallyBasedMaterial, textureDir: URL?, index: Int) throws -> MDLMaterial {
-    let mdl = MDLMaterial(name: "material", scatteringFunction: MDLPhysicallyPlausibleScatteringFunction())
+private func makeMatRecord(from pbr: PhysicallyBasedMaterial, textureDir: URL?, index: Int) throws -> MaterialRecord {
+    let name = "mat\(index)"
+    let mdl = MDLMaterial(name: name, scatteringFunction: MDLPhysicallyPlausibleScatteringFunction())
 
-    // Base color: texture if available, else solid tint
-    if let texDir = textureDir, let texResource = pbr.baseColor.texture?.resource {
-        let texURL = try writeTextureResource(texResource, named: "mat\(index)_baseColor.png", in: texDir)
-        let prop = MDLMaterialProperty(name: "baseColor", semantic: .baseColor)
-        prop.urlValue = texURL
-        mdl.setProperty(prop)
-    } else {
-        var r: CGFloat = 1, g: CGFloat = 1, b: CGFloat = 1, a: CGFloat = 1
-        #if os(macOS)
-        (pbr.baseColor.tint.usingColorSpace(.sRGB) ?? pbr.baseColor.tint).getRed(&r, green: &g, blue: &b, alpha: &a)
-        #else
-        pbr.baseColor.tint.getRed(&r, green: &g, blue: &b, alpha: &a)
-        #endif
-        let colorProp = MDLMaterialProperty(name: "baseColor", semantic: .baseColor)
-        colorProp.float4Value = SIMD4<Float>(Float(r), Float(g), Float(b), Float(a))
-        mdl.setProperty(colorProp)
+    var r: CGFloat = 1, g: CGFloat = 1, b: CGFloat = 1, a: CGFloat = 1
+    #if os(macOS)
+    (pbr.baseColor.tint.usingColorSpace(.sRGB) ?? pbr.baseColor.tint).getRed(&r, green: &g, blue: &b, alpha: &a)
+    #else
+    pbr.baseColor.tint.getRed(&r, green: &g, blue: &b, alpha: &a)
+    #endif
+    let colorProp = MDLMaterialProperty(name: "baseColor", semantic: .baseColor)
+    colorProp.float4Value = SIMD4<Float>(Float(r), Float(g), Float(b), Float(a))
+    mdl.setProperty(colorProp)
+    let roughProp = MDLMaterialProperty(name: "roughness", semantic: .roughness)
+    roughProp.floatValue = pbr.roughness.scale; mdl.setProperty(roughProp)
+    let metalProp = MDLMaterialProperty(name: "metallic", semantic: .metallic)
+    metalProp.floatValue = pbr.metallic.scale; mdl.setProperty(metalProp)
+
+    var textureFiles = [String: String]()
+    if let dir = textureDir {
+        let slots: [(resource: TextureResource?, key: String, filename: String)] = [
+            (pbr.baseColor.texture?.resource,      "diffuseColor", "\(name)_baseColor.png"),
+            (pbr.normal.texture?.resource,         "normal",       "\(name)_normal.png"),
+            (pbr.roughness.texture?.resource,      "roughness",    "\(name)_roughness.png"),
+            (pbr.metallic.texture?.resource,       "metallic",     "\(name)_metallic.png"),
+            (pbr.emissiveColor.texture?.resource,  "emissiveColor","\(name)_emissive.png"),
+            (pbr.ambientOcclusion.texture?.resource,"occlusion",   "\(name)_ambientOcclusion.png"),
+        ]
+        for slot in slots {
+            guard let res = slot.resource else { continue }
+            let fileURL = try writeTextureResource(res, named: slot.filename, in: dir)
+            textureFiles[slot.key] = fileURL.lastPathComponent
+        }
     }
 
-    // Normal texture
-    if let texDir = textureDir, let texResource = pbr.normal.texture?.resource {
-        let texURL = try writeTextureResource(texResource, named: "mat\(index)_normal.png", in: texDir)
-        let prop = MDLMaterialProperty(name: "normal", semantic: .tangentSpaceNormal)
-        prop.urlValue = texURL
-        mdl.setProperty(prop)
-    }
-
-    // Roughness: texture or scalar
-    if let texDir = textureDir, let texResource = pbr.roughness.texture?.resource {
-        let texURL = try writeTextureResource(texResource, named: "mat\(index)_roughness.png", in: texDir)
-        let prop = MDLMaterialProperty(name: "roughness", semantic: .roughness)
-        prop.urlValue = texURL
-        mdl.setProperty(prop)
-    } else {
-        let prop = MDLMaterialProperty(name: "roughness", semantic: .roughness)
-        prop.floatValue = pbr.roughness.scale
-        mdl.setProperty(prop)
-    }
-
-    // Metallic: texture or scalar
-    if let texDir = textureDir, let texResource = pbr.metallic.texture?.resource {
-        let texURL = try writeTextureResource(texResource, named: "mat\(index)_metallic.png", in: texDir)
-        let prop = MDLMaterialProperty(name: "metallic", semantic: .metallic)
-        prop.urlValue = texURL
-        mdl.setProperty(prop)
-    } else {
-        let prop = MDLMaterialProperty(name: "metallic", semantic: .metallic)
-        prop.floatValue = pbr.metallic.scale
-        mdl.setProperty(prop)
-    }
-
-    // Emissive texture
-    if let texDir = textureDir, let texResource = pbr.emissiveColor.texture?.resource {
-        let texURL = try writeTextureResource(texResource, named: "mat\(index)_emissive.png", in: texDir)
-        let prop = MDLMaterialProperty(name: "emission", semantic: .emission)
-        prop.urlValue = texURL
-        mdl.setProperty(prop)
-    }
-
-    // Ambient occlusion texture
-    if let texDir = textureDir, let texResource = pbr.ambientOcclusion.texture?.resource {
-        let texURL = try writeTextureResource(texResource, named: "mat\(index)_ambientOcclusion.png", in: texDir)
-        let prop = MDLMaterialProperty(name: "ambientOcclusion", semantic: .ambientOcclusion)
-        prop.urlValue = texURL
-        mdl.setProperty(prop)
-    }
-
-    return mdl
+    return MaterialRecord(
+        mdlMaterial: mdl, name: name,
+        roughnessScale: pbr.roughness.scale, metallicScale: pbr.metallic.scale,
+        baseColorTint: SIMD4<Float>(Float(r), Float(g), Float(b), Float(a)),
+        textureFiles: textureFiles
+    )
 }
 
-/// Post-processes the exported USDA to replace absolute texture paths with bare filenames
-/// (USDZ is a flat archive), then bundles all files in stagingDir into a USDZ ZIP.
+/// Replaces the `def Scope "Materials"` block in the USDA with a hand-authored version that
+/// includes proper UsdPreviewSurface + UsdUVTexture nodes for each material's textures.
+/// MDLAsset exports UsdPreviewSurface but silently drops texture URL properties, so we inject
+/// them after the fact.
+private func patchMaterialsSection(in usda: URL, records: [MaterialRecord]) throws {
+    var text = try String(contentsOf: usda, encoding: .utf8)
+
+    var rootPrim = "model"
+    if let r = text.range(of: "defaultPrim = \"") {
+        let after = text[r.upperBound...]
+        if let end = after.firstIndex(of: "\"") { rootPrim = String(after[..<end]) }
+    }
+
+    guard let scopeRange = findScopeRange(in: text, named: "Materials") else { return }
+    text.replaceSubrange(scopeRange, with: generateMaterialsSection(records, rootPrim: rootPrim))
+    try text.write(to: usda, atomically: true, encoding: .utf8)
+}
+
+/// Returns the range in `text` covering `def Scope "name" { … }` including any leading indentation.
+private func findScopeRange(in text: String, named name: String) -> Range<String.Index>? {
+    let marker = "def Scope \"\(name)\""
+    guard let keyStart = text.range(of: marker)?.lowerBound else { return nil }
+
+    // Walk back to include leading whitespace on the same line
+    var lineStart = keyStart
+    while lineStart > text.startIndex {
+        let prev = text.index(before: lineStart)
+        let c = text[prev]; if c == " " || c == "\t" { lineStart = prev } else { break }
+    }
+
+    // Brace-balance walk starting from the opening {
+    guard let openBrace = text[keyStart...].firstIndex(of: "{") else { return nil }
+    var pos = text.index(after: openBrace)
+    var depth = 1
+    while pos < text.endIndex, depth > 0 {
+        switch text[pos] {
+        case "{": depth += 1; pos = text.index(after: pos)
+        case "}": depth -= 1; if depth > 0 { pos = text.index(after: pos) }
+        default:  pos = text.index(after: pos)
+        }
+    }
+    // pos is at closing }; advance past it and an optional trailing newline
+    var endPos = text.index(after: pos)
+    if endPos < text.endIndex && text[endPos] == "\n" { endPos = text.index(after: endPos) }
+    return lineStart ..< endPos
+}
+
+/// Generates a replacement `def Scope "Materials"` block with correct UsdPreviewSurface
+/// shader nodes and UsdUVTexture references for any textured properties.
+private func generateMaterialsSection(_ records: [MaterialRecord], rootPrim: String) -> String {
+    let ind1 = "    "    // 4 sp  — scope level
+    let ind2 = "        "    // 8 sp  — material level
+    let ind3 = "            "    // 12 sp — shader level
+    let ind4 = "                "    // 16 sp — property level
+
+    var lines = ["\(ind1)def Scope \"Materials\"", "\(ind1){"]
+
+    for rec in records {
+        let mp = "/\(rootPrim)/Materials/\(rec.name)"
+
+        lines += [
+            "\(ind2)def Material \"\(rec.name)\"",
+            "\(ind2){",
+            "\(ind3)token outputs:surface.connect = <\(mp)/surfaceShader.outputs:surface>",
+            "",
+            "\(ind3)def Shader \"surfaceShader\"",
+            "\(ind3){",
+            "\(ind4)uniform token info:id = \"UsdPreviewSurface\"",
+            "\(ind4)float inputs:clearcoat = 0",
+        ]
+
+        if rec.textureFiles["diffuseColor"] != nil {
+            lines.append("\(ind4)color3f inputs:diffuseColor.connect = <\(mp)/baseColorTex.outputs:rgb>")
+        } else {
+            let c = rec.baseColorTint
+            lines.append("\(ind4)color3f inputs:diffuseColor = (\(c.x), \(c.y), \(c.z))")
+        }
+        if rec.textureFiles["emissiveColor"] != nil {
+            lines.append("\(ind4)color3f inputs:emissiveColor.connect = <\(mp)/emissiveTex.outputs:rgb>")
+        }
+        if rec.textureFiles["metallic"] != nil {
+            lines.append("\(ind4)float inputs:metallic.connect = <\(mp)/metallicTex.outputs:r>")
+        } else {
+            lines.append("\(ind4)float inputs:metallic = \(rec.metallicScale)")
+        }
+        if rec.textureFiles["normal"] != nil {
+            lines.append("\(ind4)normal3f inputs:normal.connect = <\(mp)/normalTex.outputs:rgb>")
+        }
+        if rec.textureFiles["occlusion"] != nil {
+            lines.append("\(ind4)float inputs:occlusion.connect = <\(mp)/occlusionTex.outputs:r>")
+        }
+        if rec.textureFiles["roughness"] != nil {
+            lines.append("\(ind4)float inputs:roughness.connect = <\(mp)/roughnessTex.outputs:r>")
+        } else {
+            lines.append("\(ind4)float inputs:roughness = \(rec.roughnessScale)")
+        }
+        lines += ["\(ind4)token outputs:surface", "\(ind3)}"]
+
+        if rec.hasTextures {
+            lines += [
+                "",
+                "\(ind3)def Shader \"stReader\"",
+                "\(ind3){",
+                "\(ind4)uniform token info:id = \"UsdPrimvarReader_float2\"",
+                "\(ind4)token inputs:varname = \"st\"",
+                "\(ind4)float2 outputs:result",
+                "\(ind3)}",
+            ]
+            let slots: [(key: String, shaderName: String, output: String)] = [
+                ("diffuseColor",  "baseColorTex", "token outputs:rgb"),
+                ("normal",        "normalTex",    "token outputs:rgb"),
+                ("roughness",     "roughnessTex", "token outputs:r"),
+                ("metallic",      "metallicTex",  "token outputs:r"),
+                ("emissiveColor", "emissiveTex",  "token outputs:rgb"),
+                ("occlusion",     "occlusionTex", "token outputs:r"),
+            ]
+            for (key, shaderName, output) in slots {
+                guard let filename = rec.textureFiles[key] else { continue }
+                lines += [
+                    "",
+                    "\(ind3)def Shader \"\(shaderName)\"",
+                    "\(ind3){",
+                    "\(ind4)uniform token info:id = \"UsdUVTexture\"",
+                    "\(ind4)asset inputs:file = @\(filename)@",
+                    "\(ind4)float2 inputs:st.connect = <\(mp)/stReader.outputs:result>",
+                    "\(ind4)\(output)",
+                    "\(ind3)}",
+                ]
+            }
+        }
+
+        lines += ["\(ind2)}", ""]
+    }
+
+    lines.append("\(ind1)}")
+    return lines.joined(separator: "\n") + "\n"
+}
+
+/// Packages all files in stagingDir into a USDZ ZIP archive.
+/// USDZ requires each file's data to begin at a 64-byte-aligned offset within the archive.
 private func packageAsUSDZ(stagingDir: URL, to url: URL) throws {
     let files = try FileManager.default.contentsOfDirectory(at: stagingDir, includingPropertiesForKeys: nil)
-    guard let usda = files.first(where: { $0.pathExtension == "usda" }) else {
+    guard files.contains(where: { $0.pathExtension == "usda" }) else {
         throw ModelIOWriteError.exportFailed(url)
     }
 
-    // Replace absolute texture paths with bare filenames so references work inside the flat USDZ archive
-    var usdaText = try String(contentsOf: usda, encoding: .utf8)
-    for file in files where file != usda {
-        usdaText = usdaText.replacingOccurrences(of: file.path, with: file.lastPathComponent)
-        usdaText = usdaText.replacingOccurrences(of: file.absoluteString, with: file.lastPathComponent)
-    }
-    try usdaText.write(to: usda, atomically: true, encoding: .utf8)
-
-    // USDA must be the first entry in a valid USDZ archive
-    let sortedFiles = files.sorted { a, b in
+    // USDA must be first entry for USDZ validity; remaining files sorted alphabetically
+    let sorted = files.sorted { a, b in
         if a.pathExtension == "usda" { return true }
         if b.pathExtension == "usda" { return false }
         return a.lastPathComponent < b.lastPathComponent
@@ -364,19 +424,26 @@ private func packageAsUSDZ(stagingDir: URL, to url: URL) throws {
     var centralDirectory = Data()
     var fileCount: UInt16 = 0
 
-    for fileURL in sortedFiles {
+    for fileURL in sorted {
         let fileData = try Data(contentsOf: fileURL)
         let filenameBytes = Data(fileURL.lastPathComponent.utf8)
         let crc = zipCRC32(fileData)
         let size = UInt32(fileData.count)
         let localHeaderOffset = UInt32(zip.count)
 
+        // USDZ spec: each file's data must start at a 64-byte-aligned offset.
+        // Local file header = 30 bytes fixed + filename + extra field; pad extra field to align data.
+        let dataStartWithoutExtra = zip.count + 30 + filenameBytes.count
+        let paddingNeeded = (64 - (dataStartWithoutExtra % 64)) % 64
+        let alignmentPadding = Data(repeating: 0, count: paddingNeeded)
+
         // Local file header
         zip.appendLE(UInt32(0x04034b50)); zip.appendLE(UInt16(20)); zip.appendLE(UInt16(0))
         zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0))
         zip.appendLE(crc); zip.appendLE(size); zip.appendLE(size)
-        zip.appendLE(UInt16(filenameBytes.count)); zip.appendLE(UInt16(0))
+        zip.appendLE(UInt16(filenameBytes.count)); zip.appendLE(UInt16(paddingNeeded))
         zip.append(filenameBytes)
+        zip.append(alignmentPadding)
         zip.append(fileData)
 
         // Central directory entry
