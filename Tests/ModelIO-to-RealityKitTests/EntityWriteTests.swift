@@ -124,3 +124,25 @@ import ModelIO
     let extents = loaded.visualBounds(relativeTo: nil).extents
     #expect(extents.x > 0 && extents.y > 0 && extents.z > 0, "Loaded USDZ mesh has zero extents")
 }
+
+@Test @MainActor func testTextureEmbeddedInUSDZ() async throws {
+    let objURL = try #require(Bundle.module.url(forResource: "xyzBlock", withExtension: "obj"), "xyzBlock.obj not found in test bundle")
+
+    let entity = try await ModelEntity.fromMDLAsset(url: objURL)
+    let hasTexture = entity.model?.materials.first.flatMap { $0 as? PhysicallyBasedMaterial }?.baseColor.texture != nil
+    try #require(hasTexture, "xyzBlock.obj did not load with a baseColor texture — test precondition failed")
+
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("usdz")
+    defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+    try await entity.writeMDLAsset(to: tmpURL)
+
+    #expect(FileManager.default.fileExists(atPath: tmpURL.path), "USDZ file was not created")
+
+    // USDZ is a ZIP archive — verify it contains at least one PNG (PNG magic bytes 0x89 0x50 0x4E 0x47)
+    let zipData = try Data(contentsOf: tmpURL)
+    let pngMagic = Data([0x89, 0x50, 0x4E, 0x47])
+    #expect(zipData.range(of: pngMagic) != nil, "USDZ archive does not contain any PNG texture; baseColor texture was not embedded")
+}

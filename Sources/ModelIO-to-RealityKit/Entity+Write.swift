@@ -6,6 +6,8 @@
 //
 
 import Foundation
+import ImageIO
+import Metal
 import ModelIO
 import RealityKit
 
@@ -19,6 +21,24 @@ enum ModelIOWriteError: Error, LocalizedError {
             return "No ModelEntity meshes found in the entity tree"
         case .exportFailed(let url):
             return "MDLAsset export to \(url.lastPathComponent) failed"
+        }
+    }
+}
+
+private enum TextureExportError: Error, LocalizedError {
+    case noMetalDevice
+    case textureAllocationFailed
+    case blitEncoderFailed
+    case imageCreationFailed
+    case imageSaveFailed(URL)
+
+    var errorDescription: String? {
+        switch self {
+        case .noMetalDevice: return "No Metal device available for texture export"
+        case .textureAllocationFailed: return "Failed to allocate MTLTexture for texture export"
+        case .blitEncoderFailed: return "Failed to create blit command encoder for texture synchronization"
+        case .imageCreationFailed: return "Failed to create CGImage from texture pixel data"
+        case .imageSaveFailed(let url): return "Failed to save texture image at \(url.lastPathComponent)"
         }
     }
 }
@@ -42,8 +62,23 @@ enum ModelIOWriteError: Error, LocalizedError {
             throw ModelIOWriteError.noMeshesFound
         }
 
+        let isUSDZ = url.pathExtension.lowercased() == "usdz"
+
+        // For USDZ, create a staging directory so textures land alongside the USDA before packaging
+        let stagingDir: URL?
+        if isUSDZ {
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            stagingDir = dir
+        } else {
+            stagingDir = nil
+        }
+        defer { if let dir = stagingDir { try? FileManager.default.removeItem(at: dir) } }
+
         let asset = MDLAsset()
         let allocator = MDLMeshBufferDataAllocator()
+        var materialCounter = 0
 
         for modelEntity in modelEntities {
             guard let models = modelEntity.model?.mesh.contents.models else { continue }
@@ -117,7 +152,8 @@ enum ModelIOWriteError: Error, LocalizedError {
 
                     let materialIndex = Int(part.materialIndex)
                     let pbr = (materialIndex < materials.count ? materials[materialIndex] : materials.first) as? PhysicallyBasedMaterial
-                    let mdlMaterial = pbr.map { makeMDLMaterial(from: $0) }
+                    let mdlMaterial = try pbr.map { try makeMDLMaterial(from: $0, textureDir: stagingDir, index: materialCounter) }
+                    materialCounter += 1
 
                     let submesh = MDLSubmesh(
                         indexBuffer: indexBuffer,
@@ -139,81 +175,228 @@ enum ModelIOWriteError: Error, LocalizedError {
             }
         }
 
-        if url.pathExtension.lowercased() == "usdz" {
-            try packageAsUSDZ(asset: asset, to: url)
+        if isUSDZ {
+            let usda = stagingDir!.appendingPathComponent("model.usda")
+            try asset.export(to: usda)
+            try packageAsUSDZ(stagingDir: stagingDir!, to: url)
         } else {
             try asset.export(to: url)
         }
     }
 }
 
-/// Builds an MDLMaterial from a PhysicallyBasedMaterial's scalar properties.
-/// Normal texture export is not yet supported because TextureResource has no direct
-/// pixel-extraction path without a full Metal pipeline setup.
-private func makeMDLMaterial(from pbr: PhysicallyBasedMaterial) -> MDLMaterial {
+/// Copies a TextureResource to an MTLTexture, reads back the pixels, and writes a PNG to the given directory.
+@MainActor
+private func writeTextureResource(_ resource: TextureResource, named name: String, in directory: URL) throws -> URL {
+    guard let device = MTLCreateSystemDefaultDevice() else {
+        throw TextureExportError.noMetalDevice
+    }
+
+    let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .rgba8Unorm,
+        width: resource.width,
+        height: resource.height,
+        mipmapped: false
+    )
+    descriptor.usage = .shaderWrite
+
+    guard let mtlTexture = device.makeTexture(descriptor: descriptor) else {
+        throw TextureExportError.textureAllocationFailed
+    }
+
+    try resource.copy(to: mtlTexture)
+
+    #if os(macOS)
+    if mtlTexture.storageMode == .managed {
+        guard let queue = device.makeCommandQueue(),
+              let commandBuffer = queue.makeCommandBuffer(),
+              let blitEncoder = commandBuffer.makeBlitCommandEncoder()
+        else { throw TextureExportError.blitEncoderFailed }
+        blitEncoder.synchronize(resource: mtlTexture)
+        blitEncoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+    }
+    #endif
+
+    let bytesPerRow = 4 * resource.width
+    var bytes = [UInt8](repeating: 0, count: resource.height * bytesPerRow)
+    bytes.withUnsafeMutableBytes { ptr in
+        mtlTexture.getBytes(
+            ptr.baseAddress!,
+            bytesPerRow: bytesPerRow,
+            from: MTLRegion(origin: MTLOrigin(), size: MTLSize(width: resource.width, height: resource.height, depth: 1)),
+            mipmapLevel: 0
+        )
+    }
+
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    guard let dataProvider = CGDataProvider(data: Data(bytes) as CFData),
+          let cgImage = CGImage(
+              width: resource.width,
+              height: resource.height,
+              bitsPerComponent: 8,
+              bitsPerPixel: 32,
+              bytesPerRow: bytesPerRow,
+              space: colorSpace,
+              bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+              provider: dataProvider,
+              decode: nil,
+              shouldInterpolate: false,
+              intent: .defaultIntent
+          )
+    else {
+        throw TextureExportError.imageCreationFailed
+    }
+
+    let destURL = directory.appendingPathComponent(name)
+    guard let destination = CGImageDestinationCreateWithURL(destURL as CFURL, "public.png" as CFString, 1, nil) else {
+        throw TextureExportError.imageSaveFailed(destURL)
+    }
+    CGImageDestinationAddImage(destination, cgImage, nil)
+    guard CGImageDestinationFinalize(destination) else {
+        throw TextureExportError.imageSaveFailed(destURL)
+    }
+
+    return destURL
+}
+
+/// Builds an MDLMaterial from a PhysicallyBasedMaterial.
+/// When textureDir is provided, each texture property is written as a PNG and referenced by absolute URL;
+/// scalars are used as fallback for properties without textures.
+@MainActor
+private func makeMDLMaterial(from pbr: PhysicallyBasedMaterial, textureDir: URL?, index: Int) throws -> MDLMaterial {
     let mdl = MDLMaterial(name: "material", scatteringFunction: MDLPhysicallyPlausibleScatteringFunction())
 
-    var r: CGFloat = 1, g: CGFloat = 1, b: CGFloat = 1, a: CGFloat = 1
-    #if os(macOS)
-    (pbr.baseColor.tint.usingColorSpace(.sRGB) ?? pbr.baseColor.tint).getRed(&r, green: &g, blue: &b, alpha: &a)
-    #else
-    pbr.baseColor.tint.getRed(&r, green: &g, blue: &b, alpha: &a)
-    #endif
-    let colorProp = MDLMaterialProperty(name: "baseColor", semantic: .baseColor)
-    colorProp.float4Value = SIMD4<Float>(Float(r), Float(g), Float(b), Float(a))
-    mdl.setProperty(colorProp)
+    // Base color: texture if available, else solid tint
+    if let texDir = textureDir, let texResource = pbr.baseColor.texture?.resource {
+        let texURL = try writeTextureResource(texResource, named: "mat\(index)_baseColor.png", in: texDir)
+        let prop = MDLMaterialProperty(name: "baseColor", semantic: .baseColor)
+        prop.urlValue = texURL
+        mdl.setProperty(prop)
+    } else {
+        var r: CGFloat = 1, g: CGFloat = 1, b: CGFloat = 1, a: CGFloat = 1
+        #if os(macOS)
+        (pbr.baseColor.tint.usingColorSpace(.sRGB) ?? pbr.baseColor.tint).getRed(&r, green: &g, blue: &b, alpha: &a)
+        #else
+        pbr.baseColor.tint.getRed(&r, green: &g, blue: &b, alpha: &a)
+        #endif
+        let colorProp = MDLMaterialProperty(name: "baseColor", semantic: .baseColor)
+        colorProp.float4Value = SIMD4<Float>(Float(r), Float(g), Float(b), Float(a))
+        mdl.setProperty(colorProp)
+    }
 
-    let roughnessProp = MDLMaterialProperty(name: "roughness", semantic: .roughness)
-    roughnessProp.floatValue = pbr.roughness.scale
-    mdl.setProperty(roughnessProp)
+    // Normal texture
+    if let texDir = textureDir, let texResource = pbr.normal.texture?.resource {
+        let texURL = try writeTextureResource(texResource, named: "mat\(index)_normal.png", in: texDir)
+        let prop = MDLMaterialProperty(name: "normal", semantic: .tangentSpaceNormal)
+        prop.urlValue = texURL
+        mdl.setProperty(prop)
+    }
 
-    let metallicProp = MDLMaterialProperty(name: "metallic", semantic: .metallic)
-    metallicProp.floatValue = pbr.metallic.scale
-    mdl.setProperty(metallicProp)
+    // Roughness: texture or scalar
+    if let texDir = textureDir, let texResource = pbr.roughness.texture?.resource {
+        let texURL = try writeTextureResource(texResource, named: "mat\(index)_roughness.png", in: texDir)
+        let prop = MDLMaterialProperty(name: "roughness", semantic: .roughness)
+        prop.urlValue = texURL
+        mdl.setProperty(prop)
+    } else {
+        let prop = MDLMaterialProperty(name: "roughness", semantic: .roughness)
+        prop.floatValue = pbr.roughness.scale
+        mdl.setProperty(prop)
+    }
+
+    // Metallic: texture or scalar
+    if let texDir = textureDir, let texResource = pbr.metallic.texture?.resource {
+        let texURL = try writeTextureResource(texResource, named: "mat\(index)_metallic.png", in: texDir)
+        let prop = MDLMaterialProperty(name: "metallic", semantic: .metallic)
+        prop.urlValue = texURL
+        mdl.setProperty(prop)
+    } else {
+        let prop = MDLMaterialProperty(name: "metallic", semantic: .metallic)
+        prop.floatValue = pbr.metallic.scale
+        mdl.setProperty(prop)
+    }
+
+    // Emissive texture
+    if let texDir = textureDir, let texResource = pbr.emissiveColor.texture?.resource {
+        let texURL = try writeTextureResource(texResource, named: "mat\(index)_emissive.png", in: texDir)
+        let prop = MDLMaterialProperty(name: "emission", semantic: .emission)
+        prop.urlValue = texURL
+        mdl.setProperty(prop)
+    }
+
+    // Ambient occlusion texture
+    if let texDir = textureDir, let texResource = pbr.ambientOcclusion.texture?.resource {
+        let texURL = try writeTextureResource(texResource, named: "mat\(index)_ambientOcclusion.png", in: texDir)
+        let prop = MDLMaterialProperty(name: "ambientOcclusion", semantic: .ambientOcclusion)
+        prop.urlValue = texURL
+        mdl.setProperty(prop)
+    }
 
     return mdl
 }
 
-/// Exports the MDLAsset to a USDA file and packages it as a USDZ ZIP archive.
-/// USDZ files are uncompressed (stored) ZIP archives; MDLAsset handles the USD layer export.
-private func packageAsUSDZ(asset: MDLAsset, to url: URL) throws {
-    let tempUSDA = FileManager.default.temporaryDirectory
-        .appendingPathComponent(UUID().uuidString)
-        .appendingPathExtension("usda")
-    defer { try? FileManager.default.removeItem(at: tempUSDA) }
+/// Post-processes the exported USDA to replace absolute texture paths with bare filenames
+/// (USDZ is a flat archive), then bundles all files in stagingDir into a USDZ ZIP.
+private func packageAsUSDZ(stagingDir: URL, to url: URL) throws {
+    let files = try FileManager.default.contentsOfDirectory(at: stagingDir, includingPropertiesForKeys: nil)
+    guard let usda = files.first(where: { $0.pathExtension == "usda" }) else {
+        throw ModelIOWriteError.exportFailed(url)
+    }
 
-    try asset.export(to: tempUSDA)
-    let fileData = try Data(contentsOf: tempUSDA)
-    let filenameBytes = Data("model.usda".utf8)
+    // Replace absolute texture paths with bare filenames so references work inside the flat USDZ archive
+    var usdaText = try String(contentsOf: usda, encoding: .utf8)
+    for file in files where file != usda {
+        usdaText = usdaText.replacingOccurrences(of: file.path, with: file.lastPathComponent)
+        usdaText = usdaText.replacingOccurrences(of: file.absoluteString, with: file.lastPathComponent)
+    }
+    try usdaText.write(to: usda, atomically: true, encoding: .utf8)
 
-    let crc = zipCRC32(fileData)
-    let size = UInt32(fileData.count)
+    // USDA must be the first entry in a valid USDZ archive
+    let sortedFiles = files.sorted { a, b in
+        if a.pathExtension == "usda" { return true }
+        if b.pathExtension == "usda" { return false }
+        return a.lastPathComponent < b.lastPathComponent
+    }
+
     var zip = Data()
+    var centralDirectory = Data()
+    var fileCount: UInt16 = 0
 
-    // Local file header
-    let localHeaderOffset = UInt32(0)
-    zip.appendLE(UInt32(0x04034b50)); zip.appendLE(UInt16(20)); zip.appendLE(UInt16(0))
-    zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0))
-    zip.appendLE(crc); zip.appendLE(size); zip.appendLE(size)
-    zip.appendLE(UInt16(filenameBytes.count)); zip.appendLE(UInt16(0))
-    zip.append(filenameBytes)
-    zip.append(fileData)
+    for fileURL in sortedFiles {
+        let fileData = try Data(contentsOf: fileURL)
+        let filenameBytes = Data(fileURL.lastPathComponent.utf8)
+        let crc = zipCRC32(fileData)
+        let size = UInt32(fileData.count)
+        let localHeaderOffset = UInt32(zip.count)
 
-    // Central directory entry
+        // Local file header
+        zip.appendLE(UInt32(0x04034b50)); zip.appendLE(UInt16(20)); zip.appendLE(UInt16(0))
+        zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0))
+        zip.appendLE(crc); zip.appendLE(size); zip.appendLE(size)
+        zip.appendLE(UInt16(filenameBytes.count)); zip.appendLE(UInt16(0))
+        zip.append(filenameBytes)
+        zip.append(fileData)
+
+        // Central directory entry
+        centralDirectory.appendLE(UInt32(0x02014b50)); centralDirectory.appendLE(UInt16(20)); centralDirectory.appendLE(UInt16(20))
+        centralDirectory.appendLE(UInt16(0)); centralDirectory.appendLE(UInt16(0)); centralDirectory.appendLE(UInt16(0)); centralDirectory.appendLE(UInt16(0))
+        centralDirectory.appendLE(crc); centralDirectory.appendLE(size); centralDirectory.appendLE(size)
+        centralDirectory.appendLE(UInt16(filenameBytes.count)); centralDirectory.appendLE(UInt16(0)); centralDirectory.appendLE(UInt16(0))
+        centralDirectory.appendLE(UInt16(0)); centralDirectory.appendLE(UInt16(0)); centralDirectory.appendLE(UInt32(0))
+        centralDirectory.appendLE(localHeaderOffset)
+        centralDirectory.append(filenameBytes)
+        fileCount += 1
+    }
+
     let centralDirOffset = UInt32(zip.count)
-    zip.appendLE(UInt32(0x02014b50)); zip.appendLE(UInt16(20)); zip.appendLE(UInt16(20))
-    zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0))
-    zip.appendLE(crc); zip.appendLE(size); zip.appendLE(size)
-    zip.appendLE(UInt16(filenameBytes.count)); zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0))
-    zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0)); zip.appendLE(UInt32(0))
-    zip.appendLE(localHeaderOffset)
-    zip.append(filenameBytes)
-
-    let centralDirSize = UInt32(zip.count) - centralDirOffset
+    let centralDirSize = UInt32(centralDirectory.count)
+    zip.append(centralDirectory)
 
     // End of central directory record
     zip.appendLE(UInt32(0x06054b50)); zip.appendLE(UInt16(0)); zip.appendLE(UInt16(0))
-    zip.appendLE(UInt16(1)); zip.appendLE(UInt16(1))
+    zip.appendLE(fileCount); zip.appendLE(fileCount)
     zip.appendLE(centralDirSize); zip.appendLE(centralDirOffset); zip.appendLE(UInt16(0))
 
     try zip.write(to: url)
