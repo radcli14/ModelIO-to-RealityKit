@@ -1,5 +1,5 @@
 # ModelIO-to-RealityKit
-Extensions to create RealityKit entities from STL, OBJ, PLY, and ABC formats supported in ModelIO
+Extensions to load and export 3D models between ModelIO-compatible formats and RealityKit
 
 ## Background
 
@@ -8,9 +8,8 @@ In one of my own projects, [Augmented Reality Mobile Robotics (ARMOR)](https://w
 These file formats are supported by Apple's [ModelIO](https://developer.apple.com/documentation/modelio), which is a lower level package that loads in the models as raw data and buffers, using data types that trace back to older Objective C classes.
 While there is not always an exact mapping for all 3D model formats, there is sufficient data to be unpacked from the ModelIO types to be able to generate the meshes and materials to be rendered in RealityKit.
 
-This package contains a variety of extensions, aimed to be utilities that map the types used in ModelIO to more modern Swift arrays, and with more strict type definition, all with the intent of conversion into RealityKit.
-You may refer to the individual extensions and documentation as you wish, though I recommend you stick to the minimal example at the end of this readme.
-Of course, if you wish to improve on these extensions, I welcome any and all contributions.
+This package also provides the reverse direction: any RealityKit `Entity` tree can be exported to a file on disk via `writeMDLAsset(to:)`.
+When exporting to USDZ, PBR texture maps (base color, normal, roughness, metallic, emissive, and ambient occlusion) are extracted from `TextureResource` using Metal and embedded directly in the archive, producing a self-contained file that loads correctly in QuickLook and RealityKit.
 
 ## Installation
 
@@ -20,13 +19,31 @@ The package may be installed using Swift Package Manager, in XCode, as follows:g
 3. Make sure your project is selected in the `Add to Project` line, then click the `Add Package` button in the lower right.
 4. Make sure your target is selected in the `Add to Target` line, then click the `Add Package` button again.
 
-## Minimal Example
+## Supported Formats
 
-The simplest entry point is to use the extension `.fromMDLAsset` with a valid `URL` for a file that can be handled by ModelIO.
-That extension is `async throws`, and is formatted as follows:
+Both loading and exporting rely on ModelIO's format support.
+
+| Format | Extension | Load | Export |
+|--------|-----------|:----:|:------:|
+| STL | `.stl` | ✓ | ✓ |
+| Wavefront OBJ | `.obj` | ✓ | ✓ |
+| Stanford PLY | `.ply` | ✓ | ✓ |
+| Alembic | `.abc` | ✓ | ✓ |
+| USD ASCII | `.usda` | ✓ | ✓ |
+| USDZ | `.usdz` | ✓ | ✓ |
+
+## Loading Models
+
+The simplest entry point is `ModelEntity.fromMDLAsset(url:)` with a valid `URL` for a file that ModelIO can read.
 
 ```swift
-try await ModelEntity.fromMDLAsset(url: URL)
+let entity = try await ModelEntity.fromMDLAsset(url: url)
+```
+
+If your file arrives as raw `Data` rather than a URL (e.g. downloaded from a server), use the `data:format:` overload and supply the file extension as the format string:
+
+```swift
+let entity = try await ModelEntity.fromMDLAsset(data: fileData, format: "obj")
 ```
 
 In the example below, the project contains a Wavefront Object file named `shiny.obj` in its asset bundle.
@@ -60,6 +77,25 @@ struct ContentView: View {
 
 ![Screenshot](screenshot.png)
 
+## Exporting Models
+
+Any `Entity` in a RealityKit scene can be written to a file using `writeMDLAsset(to:)`.
+The output format is determined by the file extension of the destination URL.
+
+```swift
+let url = URL.documentsDirectory.appendingPathComponent("model.usdz")
+try await entity.writeMDLAsset(to: url)
+```
+
+### USDZ texture embedding
+
+When the destination is a `.usdz` file, the exporter:
+
+1. Renders each `PhysicallyBasedMaterial` texture (base color, normal, roughness, metallic, emissive, ambient occlusion) from its `TextureResource` via Metal and writes it as a PNG.
+2. Generates a proper USD material graph (`UsdPreviewSurface` + `UsdUVTexture` + `UsdPrimvarReader_float2`) with scalar fallbacks for any untextured properties.
+3. Packages the USDA stage and all PNG files into a ZIP archive that conforms to the USDZ specification, including 64-byte alignment of every file entry.
+
+The resulting `.usdz` is self-contained and compatible with QuickLook and `Entity(contentsOf:)`.
 
 ## Data Structure
 
@@ -122,6 +158,8 @@ classDiagram
     MeshResource ..> MeshDescriptor
     class ModelEntity {
         +init(mesh: MeshResource, materials: [any Material])
+        +static fromMDLAsset(url: URL) async throws
+        +static fromMDLAsset(data: Data, format: String) async throws
     }
 
     class MeshResource {
@@ -147,4 +185,9 @@ classDiagram
     MDLMesh ..> MeshDescriptor : positions, normals, textureCoordinates
     MDLSubmesh ..> MeshDescriptor : primitives
     MDLMaterialProperty ..> PhysicallyBasedMaterial : color or texture
+
+    class Entity {
+        +writeMDLAsset(to: URL) async throws
+    }
+    Entity ..> MDLAsset : export mesh + materials
 ```
