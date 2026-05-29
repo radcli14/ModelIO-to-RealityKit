@@ -52,6 +52,8 @@ private struct MaterialRecord {
     let roughnessScale: Float
     let metallicScale: Float
     let baseColorTint: SIMD4<Float>
+    let emissiveColorTint: SIMD3<Float>
+    let opacity: Float
     // USD input key → bare PNG filename (e.g. "diffuseColor" → "mat0_baseColor.png")
     let textureFiles: [String: String]
     var hasTextures: Bool { !textureFiles.isEmpty }
@@ -188,7 +190,7 @@ private func collectModelEntities(_ entity: Entity) -> [ModelEntity] {
 
 /// Copies a TextureResource to an MTLTexture, reads pixel bytes, and writes a PNG to the directory.
 @MainActor
-private func writeTextureResource(_ resource: TextureResource, named name: String, in directory: URL, useJPEG: Bool = false) throws -> URL {
+private func writeTextureResource(_ resource: TextureResource, named name: String, in directory: URL) throws -> URL {
     guard let device = MTLCreateSystemDefaultDevice() else {
         throw TextureExportError.noMetalDevice
     }
@@ -227,14 +229,10 @@ private func writeTextureResource(_ resource: TextureResource, named name: Strin
     else { throw TextureExportError.imageCreationFailed }
 
     let destURL = directory.appendingPathComponent(name)
-    let uti = useJPEG ? "public.jpeg" : "public.png"
-    guard let destination = CGImageDestinationCreateWithURL(destURL as CFURL, uti as CFString, 1, nil) else {
+    guard let destination = CGImageDestinationCreateWithURL(destURL as CFURL, "public.png" as CFString, 1, nil) else {
         throw TextureExportError.imageSaveFailed(destURL)
     }
-    let options: CFDictionary? = useJPEG
-        ? [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary
-        : nil
-    CGImageDestinationAddImage(destination, cgImage, options)
+    CGImageDestinationAddImage(destination, cgImage, nil)
     guard CGImageDestinationFinalize(destination) else { throw TextureExportError.imageSaveFailed(destURL) }
     return destURL
 }
@@ -260,19 +258,35 @@ private func makeMatRecord(from pbr: PhysicallyBasedMaterial, textureDir: URL?, 
     let metalProp = MDLMaterialProperty(name: "metallic", semantic: .metallic)
     metalProp.floatValue = pbr.metallic.scale; mdl.setProperty(metalProp)
 
+    var er: CGFloat = 0, eg: CGFloat = 0, eb: CGFloat = 0
+    #if os(macOS)
+    (pbr.emissiveColor.color.usingColorSpace(.sRGB) ?? pbr.emissiveColor.color).getRed(&er, green: &eg, blue: &eb, alpha: nil)
+    #else
+    pbr.emissiveColor.color.getRed(&er, green: &eg, blue: &eb, alpha: nil)
+    #endif
+    let emissiveProp = MDLMaterialProperty(name: "emissiveColor", semantic: .emission)
+    emissiveProp.float4Value = SIMD4<Float>(Float(er), Float(eg), Float(eb), 1)
+    mdl.setProperty(emissiveProp)
+
+    var opacity: Float = 1.0
+    if case .transparent(let o) = pbr.blending { opacity = o.scale }
+    let opacityProp = MDLMaterialProperty(name: "opacity", semantic: .opacity)
+    opacityProp.floatValue = opacity
+    mdl.setProperty(opacityProp)
+
     var textureFiles = [String: String]()
     if let dir = textureDir {
-        let slots: [(resource: TextureResource?, key: String, filename: String, useJPEG: Bool, mdlSemantic: MDLMaterialSemantic)] = [
-            (pbr.baseColor.texture?.resource,       "diffuseColor",  "\(name)_baseColor.jpg",       true,  .baseColor),
-            (pbr.normal.texture?.resource,          "normal",        "\(name)_normal.png",           false, .tangentSpaceNormal),
-            (pbr.roughness.texture?.resource,       "roughness",     "\(name)_roughness.png",        false, .roughness),
-            (pbr.metallic.texture?.resource,        "metallic",      "\(name)_metallic.png",         false, .metallic),
-            (pbr.emissiveColor.texture?.resource,   "emissiveColor", "\(name)_emissive.jpg",         true,  .emission),
-            (pbr.ambientOcclusion.texture?.resource,"occlusion",     "\(name)_ambientOcclusion.png", false, .ambientOcclusion),
+        let slots: [(resource: TextureResource?, key: String, filename: String, mdlSemantic: MDLMaterialSemantic)] = [
+            (pbr.baseColor.texture?.resource,       "diffuseColor",  "\(name)_baseColor.png",       .baseColor),
+            (pbr.normal.texture?.resource,          "normal",        "\(name)_normal.png",          .tangentSpaceNormal),
+            (pbr.roughness.texture?.resource,       "roughness",     "\(name)_roughness.png",       .roughness),
+            (pbr.metallic.texture?.resource,        "metallic",      "\(name)_metallic.png",        .metallic),
+            (pbr.emissiveColor.texture?.resource,   "emissiveColor", "\(name)_emissive.png",        .emission),
+            (pbr.ambientOcclusion.texture?.resource,"occlusion",     "\(name)_ambientOcclusion.png",.ambientOcclusion),
         ]
         for slot in slots {
             guard let res = slot.resource else { continue }
-            let fileURL = try writeTextureResource(res, named: slot.filename, in: dir, useJPEG: slot.useJPEG)
+            let fileURL = try writeTextureResource(res, named: slot.filename, in: dir)
             textureFiles[slot.key] = fileURL.lastPathComponent
             let texProp = MDLMaterialProperty(name: slot.key, semantic: slot.mdlSemantic)
             texProp.urlValue = fileURL
@@ -284,6 +298,8 @@ private func makeMatRecord(from pbr: PhysicallyBasedMaterial, textureDir: URL?, 
         mdlMaterial: mdl, name: name,
         roughnessScale: pbr.roughness.scale, metallicScale: pbr.metallic.scale,
         baseColorTint: SIMD4<Float>(Float(r), Float(g), Float(b), Float(a)),
+        emissiveColorTint: SIMD3<Float>(Float(er), Float(eg), Float(eb)),
+        opacity: opacity,
         textureFiles: textureFiles
     )
 }
@@ -367,6 +383,9 @@ private func generateMaterialsSection(_ records: [MaterialRecord], rootPrim: Str
         }
         if rec.textureFiles["emissiveColor"] != nil {
             lines.append("\(ind4)color3f inputs:emissiveColor.connect = <\(mp)/emissiveTex.outputs:rgb>")
+        } else {
+            let e = rec.emissiveColorTint
+            lines.append("\(ind4)color3f inputs:emissiveColor = (\(e.x), \(e.y), \(e.z))")
         }
         if rec.textureFiles["metallic"] != nil {
             lines.append("\(ind4)float inputs:metallic.connect = <\(mp)/metallicTex.outputs:r>")
@@ -383,6 +402,9 @@ private func generateMaterialsSection(_ records: [MaterialRecord], rootPrim: Str
             lines.append("\(ind4)float inputs:roughness.connect = <\(mp)/roughnessTex.outputs:r>")
         } else {
             lines.append("\(ind4)float inputs:roughness = \(rec.roughnessScale)")
+        }
+        if rec.opacity < 1.0 {
+            lines.append("\(ind4)float inputs:opacity = \(rec.opacity)")
         }
         lines += ["\(ind4)token outputs:surface", "\(ind3)}"]
 
