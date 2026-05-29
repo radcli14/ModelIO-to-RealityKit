@@ -64,6 +64,7 @@ private struct MaterialRecord {
         guard !modelEntities.isEmpty else { throw ModelIOWriteError.noMeshesFound }
 
         let isUSDZ = url.pathExtension.lowercased() == "usdz"
+        let isOBJ = url.pathExtension.lowercased() == "obj"
 
         // Staging directory lets texture PNGs land alongside the USDA before USDZ packaging
         let stagingDir: URL?
@@ -74,6 +75,9 @@ private struct MaterialRecord {
         } else {
             stagingDir = nil
         }
+        // For OBJ exports, textures land in the same directory as the .obj file so MDLAsset
+        // can reference them by relative path in the generated .mtl file
+        let objTextureDir: URL? = isOBJ ? url.deletingLastPathComponent() : nil
         defer { if let d = stagingDir { try? FileManager.default.removeItem(at: d) } }
 
         let asset = MDLAsset()
@@ -84,6 +88,12 @@ private struct MaterialRecord {
         for modelEntity in modelEntities {
             guard let models = modelEntity.model?.mesh.contents.models else { continue }
             let materials = modelEntity.model?.materials ?? []
+            let worldTransform = modelEntity.transformMatrix(relativeTo: nil)
+            let normalMatrix = simd_float3x3(columns: (
+                SIMD3<Float>(worldTransform[0].x, worldTransform[0].y, worldTransform[0].z),
+                SIMD3<Float>(worldTransform[1].x, worldTransform[1].y, worldTransform[1].z),
+                SIMD3<Float>(worldTransform[2].x, worldTransform[2].y, worldTransform[2].z)
+            ))
             for model in models {
                 for part in model.parts {
                     let positions = part.positions.elements
@@ -111,10 +121,14 @@ private struct MaterialRecord {
                     var vertexData = Data()
                     vertexData.reserveCapacity(positions.count * 32)
                     for i in 0..<positions.count {
-                        let p = positions[i]; var xyz = (p.x, p.y, p.z)
+                        let p = positions[i]
+                        let pw = worldTransform * SIMD4<Float>(p.x, p.y, p.z, 1)
+                        var xyz = (pw.x, pw.y, pw.z)
                         withUnsafeBytes(of: &xyz) { vertexData.append(contentsOf: $0) }
-                        let n: SIMD3<Float> = (normals?.count == positions.count) ? normals![i] : .zero
-                        var nxyz = (n.x, n.y, n.z)
+                        let nw: SIMD3<Float> = (normals?.count == positions.count)
+                            ? normalize(normalMatrix * normals![i])
+                            : .zero
+                        var nxyz = (nw.x, nw.y, nw.z)
                         withUnsafeBytes(of: &nxyz) { vertexData.append(contentsOf: $0) }
                         let uv: SIMD2<Float> = (uvs?.count == positions.count) ? uvs![i] : .zero
                         var uvxy = (uv.x, uv.y)
@@ -127,7 +141,7 @@ private struct MaterialRecord {
 
                     let matIdx = Int(part.materialIndex)
                     let pbr = (matIdx < materials.count ? materials[matIdx] : materials.first) as? PhysicallyBasedMaterial
-                    let record = try pbr.map { try makeMatRecord(from: $0, textureDir: stagingDir, index: materialCounter) }
+                    let record = try pbr.map { try makeMatRecord(from: $0, textureDir: stagingDir ?? objTextureDir, index: materialCounter) }
                     materialCounter += 1
                     if let r = record { materialRecords.append(r) }
 
@@ -174,7 +188,7 @@ private func collectModelEntities(_ entity: Entity) -> [ModelEntity] {
 
 /// Copies a TextureResource to an MTLTexture, reads pixel bytes, and writes a PNG to the directory.
 @MainActor
-private func writeTextureResource(_ resource: TextureResource, named name: String, in directory: URL) throws -> URL {
+private func writeTextureResource(_ resource: TextureResource, named name: String, in directory: URL, useJPEG: Bool = false) throws -> URL {
     guard let device = MTLCreateSystemDefaultDevice() else {
         throw TextureExportError.noMetalDevice
     }
@@ -213,10 +227,14 @@ private func writeTextureResource(_ resource: TextureResource, named name: Strin
     else { throw TextureExportError.imageCreationFailed }
 
     let destURL = directory.appendingPathComponent(name)
-    guard let destination = CGImageDestinationCreateWithURL(destURL as CFURL, "public.png" as CFString, 1, nil) else {
+    let uti = useJPEG ? "public.jpeg" : "public.png"
+    guard let destination = CGImageDestinationCreateWithURL(destURL as CFURL, uti as CFString, 1, nil) else {
         throw TextureExportError.imageSaveFailed(destURL)
     }
-    CGImageDestinationAddImage(destination, cgImage, nil)
+    let options: CFDictionary? = useJPEG
+        ? [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary
+        : nil
+    CGImageDestinationAddImage(destination, cgImage, options)
     guard CGImageDestinationFinalize(destination) else { throw TextureExportError.imageSaveFailed(destURL) }
     return destURL
 }
@@ -244,18 +262,21 @@ private func makeMatRecord(from pbr: PhysicallyBasedMaterial, textureDir: URL?, 
 
     var textureFiles = [String: String]()
     if let dir = textureDir {
-        let slots: [(resource: TextureResource?, key: String, filename: String)] = [
-            (pbr.baseColor.texture?.resource,      "diffuseColor", "\(name)_baseColor.png"),
-            (pbr.normal.texture?.resource,         "normal",       "\(name)_normal.png"),
-            (pbr.roughness.texture?.resource,      "roughness",    "\(name)_roughness.png"),
-            (pbr.metallic.texture?.resource,       "metallic",     "\(name)_metallic.png"),
-            (pbr.emissiveColor.texture?.resource,  "emissiveColor","\(name)_emissive.png"),
-            (pbr.ambientOcclusion.texture?.resource,"occlusion",   "\(name)_ambientOcclusion.png"),
+        let slots: [(resource: TextureResource?, key: String, filename: String, useJPEG: Bool, mdlSemantic: MDLMaterialSemantic)] = [
+            (pbr.baseColor.texture?.resource,       "diffuseColor",  "\(name)_baseColor.jpg",       true,  .baseColor),
+            (pbr.normal.texture?.resource,          "normal",        "\(name)_normal.png",           false, .tangentSpaceNormal),
+            (pbr.roughness.texture?.resource,       "roughness",     "\(name)_roughness.png",        false, .roughness),
+            (pbr.metallic.texture?.resource,        "metallic",      "\(name)_metallic.png",         false, .metallic),
+            (pbr.emissiveColor.texture?.resource,   "emissiveColor", "\(name)_emissive.jpg",         true,  .emission),
+            (pbr.ambientOcclusion.texture?.resource,"occlusion",     "\(name)_ambientOcclusion.png", false, .ambientOcclusion),
         ]
         for slot in slots {
             guard let res = slot.resource else { continue }
-            let fileURL = try writeTextureResource(res, named: slot.filename, in: dir)
+            let fileURL = try writeTextureResource(res, named: slot.filename, in: dir, useJPEG: slot.useJPEG)
             textureFiles[slot.key] = fileURL.lastPathComponent
+            let texProp = MDLMaterialProperty(name: slot.key, semantic: slot.mdlSemantic)
+            texProp.urlValue = fileURL
+            mdl.setProperty(texProp)
         }
     }
 

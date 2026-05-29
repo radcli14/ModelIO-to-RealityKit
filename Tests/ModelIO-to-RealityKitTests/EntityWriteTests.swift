@@ -177,8 +177,9 @@ import GLTFKit2
 
     #expect(FileManager.default.fileExists(atPath: tmpURL.path), "USDZ file was not created")
 
-    // USDZ is a ZIP archive — verify it contains at least one PNG (PNG magic bytes 0x89 0x50 0x4E 0x47)
+    // USDZ is a ZIP archive — verify it contains at least one JPEG (magic bytes 0xFF 0xD8 0xFF)
+    // baseColor textures are exported as JPEG; data-channel textures (normal, roughness, etc.) stay PNG
     let zipData = try Data(contentsOf: tmpURL)
-    let pngMagic = Data([0x89, 0x50, 0x4E, 0x47])
-    #expect(zipData.range(of: pngMagic) != nil, "USDZ archive does not contain any PNG texture; baseColor texture was not embedded")
+    let jpegMagic = Data([0xFF, 0xD8, 0xFF])
+    #expect(zipData.range(of: jpegMagic) != nil, "USDZ archive does not contain any JPEG texture; baseColor texture was not embedded")
 }
