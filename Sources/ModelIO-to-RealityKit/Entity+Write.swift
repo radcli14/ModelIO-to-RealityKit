@@ -168,8 +168,16 @@ private struct MaterialRecord {
         if isUSDZ {
             let usda = stagingDir!.appendingPathComponent("model.usda")
             try asset.export(to: usda)
-            // MDLAsset's empty-init assumes centimeters, so it writes a 0.01 root scale. Strip it
-            // because vertex positions are already in RealityKit world-space meters.
+            // MDLAsset exports metersPerUnit = 0.01 (centimeters); RealityKit scales vertices by
+            // this value on load. Both the typed ("double") and untyped variants are handled since
+            // the exact form may vary across OS versions.
+            var usdaText = try String(contentsOf: usda, encoding: .utf8)
+            usdaText = usdaText
+                .replacingOccurrences(of: "double metersPerUnit = 0.01", with: "double metersPerUnit = 1")
+                .replacingOccurrences(of: "metersPerUnit = 0.01",        with: "metersPerUnit = 1")
+            try usdaText.write(to: usda, atomically: true, encoding: .utf8)
+            // MDLAsset's empty-init assumes centimeters, so it also writes a 0.01 root xformOp:scale.
+            // Strip it because vertex positions are already in RealityKit world-space meters.
             try stripRootScale(in: usda)
             // MDLAsset.export drops urlValue on MDLMaterialProperty, so texture UsdUVTexture nodes
             // must be injected by replacing the Materials scope after the fact.
