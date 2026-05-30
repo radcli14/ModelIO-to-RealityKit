@@ -274,6 +274,11 @@ import GLTFKit2
                 "metallic \(mat.metallic.scale) should match GLB \(glbMat.metallic.scale)")
     }
 
+    // Ambient occlusion: texture must survive (GLTFKit2 maps occlusionTexture → .ambientOcclusion, red channel)
+    if glbMat.ambientOcclusion.texture != nil {
+        #expect(mat.ambientOcclusion.texture != nil, "ambient occlusion texture was not retained in USDZ round-trip")
+    }
+
     // Opacity: blending mode and scale must survive
     let glbOpacity: Float = { if case .transparent(let o) = glbMat.blending { return o.scale }; return 1.0 }()
     let usdzOpacity: Float = { if case .transparent(let o) = mat.blending { return o.scale }; return 1.0 }()
