@@ -244,6 +244,9 @@ private func writeTextureResource(_ resource: TextureResource, named name: Strin
     let descriptor = MTLTextureDescriptor.texture2DDescriptor(
         pixelFormat: .rgba8Unorm, width: resource.width, height: resource.height, mipmapped: false)
     descriptor.usage = .shaderWrite
+    // .shared storage mode ensures CPU readback via getBytes always works.
+    // Without this, the default mode on macOS may be .private, silently returning zeros.
+    descriptor.storageMode = .shared
     guard let mtlTexture = device.makeTexture(descriptor: descriptor) else {
         throw TextureExportError.textureAllocationFailed
     }
