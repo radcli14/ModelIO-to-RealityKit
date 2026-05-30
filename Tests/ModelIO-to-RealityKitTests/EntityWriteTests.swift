@@ -182,7 +182,15 @@ import GLTFKit2
     defer { try? FileManager.default.removeItem(at: glbURL) }
 
     let entity = try await GLTFRealityKitLoader.load(from: glbURL)
+
+    func firstPBR(_ e: Entity) -> PhysicallyBasedMaterial? {
+        if let m = (e as? ModelEntity)?.model?.materials.first as? PhysicallyBasedMaterial { return m }
+        for child in e.children { if let found = firstPBR(child) { return found } }
+        return nil
+    }
+
     let glbBounds = entity.visualBounds(relativeTo: nil)
+    let glbMat = try #require(firstPBR(entity), "No PhysicallyBasedMaterial found in GLB entity")
 
     let tmpURL = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString)
@@ -194,18 +202,45 @@ import GLTFKit2
     #expect(FileManager.default.fileExists(atPath: tmpURL.path), "USDZ was not created")
 
     let loaded = try await Entity(contentsOf: tmpURL)
-
-    func firstPBR(_ e: Entity) -> PhysicallyBasedMaterial? {
-        if let m = (e as? ModelEntity)?.model?.materials.first as? PhysicallyBasedMaterial { return m }
-        for child in e.children { if let found = firstPBR(child) { return found } }
-        return nil
-    }
-
     let mat = try #require(firstPBR(loaded), "No PhysicallyBasedMaterial found in reloaded USDZ")
+
+    // Textures
     #expect(mat.baseColor.texture != nil, "baseColor texture was not preserved in USDZ round-trip")
     #expect(mat.normal.texture != nil, "normal texture was not preserved in USDZ round-trip")
 
-    // Verify scale and position: USDZ bounds must match GLB bounds within 5% of the model's size.
+    // Roughness: texture or scalar must survive
+    if glbMat.roughness.texture != nil {
+        #expect(mat.roughness.texture != nil, "roughness texture was not retained in USDZ round-trip")
+    } else {
+        #expect(abs(mat.roughness.scale - glbMat.roughness.scale) < 0.05,
+                "roughness \(mat.roughness.scale) should match GLB \(glbMat.roughness.scale)")
+    }
+
+    // Opacity: blending mode and scale must survive
+    let glbOpacity: Float = { if case .transparent(let o) = glbMat.blending { return o.scale }; return 1.0 }()
+    let usdzOpacity: Float = { if case .transparent(let o) = mat.blending { return o.scale }; return 1.0 }()
+    #expect(abs(usdzOpacity - glbOpacity) < 0.05,
+            "opacity \(usdzOpacity) should match GLB \(glbOpacity)")
+
+    // Emissive: texture or scalar color must survive
+    if glbMat.emissiveColor.texture != nil {
+        #expect(mat.emissiveColor.texture != nil, "emissive texture was not retained in USDZ round-trip")
+    } else {
+        var gr: CGFloat = 0, gg: CGFloat = 0, gb: CGFloat = 0
+        var ur: CGFloat = 0, ug: CGFloat = 0, ub: CGFloat = 0
+        #if os(macOS)
+        (glbMat.emissiveColor.color.usingColorSpace(.sRGB) ?? glbMat.emissiveColor.color).getRed(&gr, green: &gg, blue: &gb, alpha: nil)
+        (mat.emissiveColor.color.usingColorSpace(.sRGB) ?? mat.emissiveColor.color).getRed(&ur, green: &ug, blue: &ub, alpha: nil)
+        #else
+        glbMat.emissiveColor.color.getRed(&gr, green: &gg, blue: &gb, alpha: nil)
+        mat.emissiveColor.color.getRed(&ur, green: &ug, blue: &ub, alpha: nil)
+        #endif
+        #expect(abs(Float(ur) - Float(gr)) < 0.05, "emissive R \(ur) should match GLB \(gr)")
+        #expect(abs(Float(ug) - Float(gg)) < 0.05, "emissive G \(ug) should match GLB \(gg)")
+        #expect(abs(Float(ub) - Float(gb)) < 0.05, "emissive B \(ub) should match GLB \(gb)")
+    }
+
+    // Scale and position: USDZ bounds must match GLB bounds within 5% of the model's size.
     // Catches metersPerUnit regressions (100× scale error) and lost world-transform bugs.
     let usdzBounds = loaded.visualBounds(relativeTo: nil)
     let modelSize = max(glbBounds.extents.x, glbBounds.extents.y, glbBounds.extents.z)
