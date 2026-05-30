@@ -465,13 +465,16 @@ private func generateMaterialsSection(_ records: [MaterialRecord], rootPrim: Str
                 "\(ind4)float2 outputs:result",
                 "\(ind3)}",
             ]
+            // Output types must match USD spec: float for scalars, float3/color3f for vectors.
+            // Using "token" here causes RealityKit to discard the connection and fall back to
+            // scalar defaults (roughness=0.5, metallic=0, etc.), breaking PBR rendering.
             let slots: [(key: String, shaderName: String, output: String)] = [
-                ("diffuseColor",  "baseColorTex", "token outputs:rgb"),
-                ("normal",        "normalTex",    "token outputs:rgb"),
-                ("roughness",     "roughnessTex", "token outputs:r"),
-                ("metallic",      "metallicTex",  "token outputs:r"),
-                ("emissiveColor", "emissiveTex",  "token outputs:rgb"),
-                ("occlusion",     "occlusionTex", "token outputs:r"),
+                ("diffuseColor",  "baseColorTex", "color3f outputs:rgb"),
+                ("normal",        "normalTex",    "float3 outputs:rgb"),
+                ("roughness",     "roughnessTex", "float outputs:r"),
+                ("metallic",      "metallicTex",  "float outputs:r"),
+                ("emissiveColor", "emissiveTex",  "color3f outputs:rgb"),
+                ("occlusion",     "occlusionTex", "float outputs:r"),
             ]
             for (key, shaderName, output) in slots {
                 guard let filename = rec.textureFiles[key] else { continue }
