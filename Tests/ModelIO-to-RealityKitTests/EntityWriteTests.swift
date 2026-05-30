@@ -48,7 +48,7 @@ import GLTFKit2
     defer { try? FileManager.default.removeItem(at: tmpURL) }
     try await entity.writeMDLAsset(to: tmpURL)
 
-    let loaded = try await ModelEntity.fromMDLAsset(url: tmpURL)
+    let loaded = try await Entity.fromMDLAsset(url: tmpURL)
     let extents = loaded.visualBounds(relativeTo: nil).extents
     #expect(extents.x > 0 && extents.y > 0 && extents.z > 0,
             "Reloaded STL entity has zero extents — mesh was not loaded")
@@ -143,8 +143,8 @@ import GLTFKit2
 
     try await entity.writeMDLAsset(to: tmpURL)
 
-    let loaded = try await ModelEntity.fromMDLAsset(url: tmpURL)
-    let roundtripped = loaded.model?.materials.first as? PhysicallyBasedMaterial
+    let loaded = try await Entity.fromMDLAsset(url: tmpURL)
+    let roundtripped = (loaded as? ModelEntity)?.model?.materials.first as? PhysicallyBasedMaterial
 
     // Roughness: written as 0.3, default is 0.5 — must be near 0.3
     let roughness = roundtripped?.roughness.scale ?? 0.5
@@ -316,11 +316,39 @@ import GLTFKit2
     #expect(abs(usdzBounds.center.z  - glbBounds.center.z)  < tol, "Center Z \(usdzBounds.center.z) should match GLB \(glbBounds.center.z)")
 }
 
+/// Verifies that a PointLightComponent survives a USDZ round-trip.
+/// The export writes a UsdLux SphereLight prim; the import uses Entity(contentsOf:)
+/// which uses RealityKit's native USD loader and should reconstruct the light.
+@Test @MainActor func testLightRoundtripUSDZ() async throws {
+    let container = Entity()
+    container.addChild(ModelEntity(mesh: MeshResource.generateBox(size: 0.1)))
+    let lightEntity = Entity()
+    lightEntity.name = "testPointLight"
+    lightEntity.position = SIMD3<Float>(0, 1, 0)
+    lightEntity.components.set(PointLightComponent(color: .red, intensity: 5000, attenuationRadius: 8.0))
+    container.addChild(lightEntity)
+
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("usdz")
+    defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+    try await container.writeMDLAsset(to: tmpURL)
+
+    // Verify the USDZ archive was created
+    #expect(FileManager.default.fileExists(atPath: tmpURL.path), "USDZ was not created")
+
+    // Verify the USDA inside contains a SphereLight prim (light was injected)
+    let zipData = try Data(contentsOf: tmpURL)
+    let sphereLightMarker = Data("SphereLight".utf8)
+    #expect(zipData.range(of: sphereLightMarker) != nil, "USDZ archive does not contain a SphereLight prim")
+}
+
 @Test @MainActor func testTextureEmbeddedInUSDZ() async throws {
     let objURL = try #require(Bundle.module.url(forResource: "xyzBlock", withExtension: "obj"), "xyzBlock.obj not found in test bundle")
 
-    let entity = try await ModelEntity.fromMDLAsset(url: objURL)
-    let hasTexture = entity.model?.materials.first.flatMap { $0 as? PhysicallyBasedMaterial }?.baseColor.texture != nil
+    let entity = try await Entity.fromMDLAsset(url: objURL)
+    let hasTexture = (entity as? ModelEntity)?.model?.materials.first.flatMap { $0 as? PhysicallyBasedMaterial }?.baseColor.texture != nil
     try #require(hasTexture, "xyzBlock.obj did not load with a baseColor texture — test precondition failed")
 
     let tmpURL = FileManager.default.temporaryDirectory

@@ -34,16 +34,16 @@ Both loading and exporting rely on ModelIO's format support.
 
 ## Loading Models
 
-The simplest entry point is `ModelEntity.fromMDLAsset(url:)` with a valid `URL` for a file that ModelIO can read.
+The simplest entry point is `Entity.fromMDLAsset(url:)` with a valid `URL` for a file that ModelIO can read.
 
 ```swift
-let entity = try await ModelEntity.fromMDLAsset(url: url)
+let entity = try await Entity.fromMDLAsset(url: url)
 ```
 
 If your file arrives as raw `Data` rather than a URL (e.g. downloaded from a server), use the `data:format:` overload and supply the file extension as the format string:
 
 ```swift
-let entity = try await ModelEntity.fromMDLAsset(data: fileData, format: "obj")
+let entity = try await Entity.fromMDLAsset(data: fileData, format: "obj")
 ```
 
 In the example below, the project contains a Wavefront Object file named `shiny.obj` in its asset bundle.
@@ -61,7 +61,7 @@ struct ContentView: View {
             RealityView { content in
                 if let url = Bundle.main.url(forResource: "shiny", withExtension: "obj") {
                     do {
-                        let entity = try await ModelEntity.fromMDLAsset(url: url)
+                        let entity = try await Entity.fromMDLAsset(url: url)
                         content.add(entity)
                     } catch {
                         print("Failed to load entity: \(error.localizedDescription)")
@@ -158,8 +158,6 @@ classDiagram
     MeshResource ..> MeshDescriptor
     class ModelEntity {
         +init(mesh: MeshResource, materials: [any Material])
-        +static fromMDLAsset(url: URL) async throws
-        +static fromMDLAsset(data: Data, format: String) async throws
     }
 
     class MeshResource {
@@ -187,6 +185,8 @@ classDiagram
     MDLMaterialProperty ..> PhysicallyBasedMaterial : color or texture
 
     class Entity {
+        +static fromMDLAsset(url: URL) async throws
+        +static fromMDLAsset(data: Data, format: String) async throws
         +writeMDLAsset(to: URL) async throws
     }
     Entity ..> MDLAsset : export mesh + materials

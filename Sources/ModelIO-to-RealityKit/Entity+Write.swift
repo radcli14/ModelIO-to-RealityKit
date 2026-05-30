@@ -25,6 +25,106 @@ enum ModelIOWriteError: Error, LocalizedError {
     }
 }
 
+private enum ExportedLight {
+    case point(name: String, position: SIMD3<Float>, color: SIMD3<Float>, intensity: Float)
+    case directional(name: String, rotation: simd_quatf, color: SIMD3<Float>, intensity: Float)
+    case spot(name: String, position: SIMD3<Float>, rotation: simd_quatf, color: SIMD3<Float>, intensity: Float, innerAngle: Float, outerAngle: Float)
+}
+
+@MainActor
+private func collectLights(_ entity: Entity, counter: inout Int) -> [ExportedLight] {
+    var result = [ExportedLight]()
+    let rawName = entity.name.isEmpty ? "light" : entity.name
+    let safe = rawName.filter { $0.isLetter || $0.isNumber || $0 == "_" }
+    let safeName = safe.isEmpty ? "light" : safe
+    let pos = entity.position(relativeTo: nil)
+    let rot = Transform(matrix: entity.transformMatrix(relativeTo: nil)).rotation
+
+    func extractRGB(from color: PointLightComponent.Color) -> SIMD3<Float> {
+        var r: CGFloat = 1, g: CGFloat = 1, b: CGFloat = 1
+        #if os(macOS)
+        (color.usingColorSpace(.sRGB) ?? color).getRed(&r, green: &g, blue: &b, alpha: nil)
+        #else
+        color.getRed(&r, green: &g, blue: &b, alpha: nil)
+        #endif
+        return SIMD3<Float>(Float(r), Float(g), Float(b))
+    }
+
+    if let comp = entity.components[PointLightComponent.self] {
+        result.append(.point(name: "\(safeName)_\(counter)", position: pos, color: extractRGB(from: comp.color), intensity: comp.intensity))
+        counter += 1
+    }
+    if let comp = entity.components[DirectionalLightComponent.self] {
+        result.append(.directional(name: "\(safeName)_\(counter)", rotation: rot, color: extractRGB(from: comp.color), intensity: comp.intensity))
+        counter += 1
+    }
+    if let comp = entity.components[SpotLightComponent.self] {
+        result.append(.spot(name: "\(safeName)_\(counter)", position: pos, rotation: rot, color: extractRGB(from: comp.color), intensity: comp.intensity, innerAngle: comp.innerAngleInDegrees, outerAngle: comp.outerAngleInDegrees))
+        counter += 1
+    }
+    for child in entity.children {
+        result.append(contentsOf: collectLights(child, counter: &counter))
+    }
+    return result
+}
+
+private func generateLightPrims(_ lights: [ExportedLight]) -> String {
+    var lines = [String]()
+    for light in lights {
+        switch light {
+        case .point(let name, let pos, let col, let intensity):
+            lines += [
+                "",
+                "    def SphereLight \"\(name)\"",
+                "    {",
+                "        float inputs:intensity = \(intensity)",
+                "        color3f inputs:color = (\(col.x), \(col.y), \(col.z))",
+                "        float inputs:radius = 0",
+                "        bool treatAsPoint = 1",
+                "        double3 xformOp:translate = (\(Double(pos.x)), \(Double(pos.y)), \(Double(pos.z)))",
+                "        uniform token[] xformOpOrder = [\"xformOp:translate\"]",
+                "    }",
+            ]
+        case .directional(let name, let rot, let col, let intensity):
+            lines += [
+                "",
+                "    def DistantLight \"\(name)\"",
+                "    {",
+                "        float inputs:intensity = \(intensity)",
+                "        color3f inputs:color = (\(col.x), \(col.y), \(col.z))",
+                "        quatf xformOp:orient = (\(rot.real), \(rot.imag.x), \(rot.imag.y), \(rot.imag.z))",
+                "        uniform token[] xformOpOrder = [\"xformOp:orient\"]",
+                "    }",
+            ]
+        case .spot(let name, let pos, let rot, let col, let intensity, let inner, let outer):
+            let softness = outer > 0 ? (outer - inner) / outer : 0
+            lines += [
+                "",
+                "    def SphereLight \"\(name)\" (",
+                "        prepend apiSchemas = [\"ShapingAPI\"]",
+                "    )",
+                "    {",
+                "        float inputs:intensity = \(intensity)",
+                "        color3f inputs:color = (\(col.x), \(col.y), \(col.z))",
+                "        float inputs:shaping:cone:angle = \(outer)",
+                "        float inputs:shaping:cone:softness = \(softness)",
+                "        float inputs:radius = 0",
+                "        bool treatAsPoint = 1",
+                "        double3 xformOp:translate = (\(Double(pos.x)), \(Double(pos.y)), \(Double(pos.z)))",
+                "        quatf xformOp:orient = (\(rot.real), \(rot.imag.x), \(rot.imag.y), \(rot.imag.z))",
+                "        uniform token[] xformOpOrder = [\"xformOp:translate\", \"xformOp:orient\"]",
+                "    }",
+            ]
+        }
+    }
+    return lines.joined(separator: "\n")
+}
+
+private func injectLights(_ lights: [ExportedLight], into text: inout String) {
+    guard !lights.isEmpty, let lastBrace = text.lastIndex(of: "}") else { return }
+    text.insert(contentsOf: generateLightPrims(lights) + "\n", at: lastBrace)
+}
+
 private enum TextureExportError: Error, LocalizedError {
     case noMetalDevice
     case textureAllocationFailed
@@ -196,6 +296,10 @@ private struct MaterialRecord {
             }
         }
 
+        // Collect lights from the entity tree for injection into USD text formats.
+        var lightCounter = 0
+        let exportedLights = collectLights(self, counter: &lightCounter)
+
         if isUSDZ {
             let usda = stagingDir!.appendingPathComponent("model.usda")
             try asset.export(to: usda)
@@ -214,6 +318,7 @@ private struct MaterialRecord {
                     with: "\n    metersPerUnit = 1\n)\n\ndef Xform"
                 )
             }
+            injectLights(exportedLights, into: &usdaText)
             try usdaText.write(to: usda, atomically: true, encoding: .utf8)
             // MDLAsset.export drops urlValue on MDLMaterialProperty, so texture UsdUVTexture nodes
             // must be injected by replacing the Materials scope after the fact.
@@ -221,8 +326,16 @@ private struct MaterialRecord {
                 try patchMaterialsSection(in: usda, records: materialRecords)
             }
             try packageAsUSDZ(stagingDir: stagingDir!, to: url)
+        } else if isOBJ {
+            try asset.export(to: url)
         } else {
             try asset.export(to: url)
+            // For USDA, inject lights into the exported text file.
+            if url.pathExtension.lowercased() == "usda" && !exportedLights.isEmpty {
+                var usdat = try String(contentsOf: url, encoding: .utf8)
+                injectLights(exportedLights, into: &usdat)
+                try usdat.write(to: url, atomically: true, encoding: .utf8)
+            }
         }
     }
 }

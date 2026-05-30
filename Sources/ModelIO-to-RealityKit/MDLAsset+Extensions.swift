@@ -47,8 +47,56 @@ import RealityKit
         let meshResource = try await getMeshResource()
         return ModelEntity(mesh: meshResource, materials: materials)
     }
-    
-    
+
+    /// All `MDLPhysicallyPlausibleLight` objects found at the top level of this asset.
+    var physicalLights: [MDLPhysicallyPlausibleLight] {
+        objects.compactMap { $0 as? MDLPhysicallyPlausibleLight }
+    }
+
+    /// Asynchronously obtain an `Entity` containing the mesh and any lights from this asset.
+    /// Returns a container `Entity` with the `ModelEntity` and light children when lights are
+    /// present; returns the `ModelEntity` directly (preserving `as? ModelEntity` casts) when none.
+    func getEntity() async throws -> Entity {
+        let modelEntity = try await getModelEntity()
+        let lightEntities = physicalLights.compactMap { makeLightEntity(from: $0) }
+        if lightEntities.isEmpty { return modelEntity }
+        let container = Entity()
+        container.addChild(modelEntity)
+        for light in lightEntities { container.addChild(light) }
+        return container
+    }
+
+    private func makeLightEntity(from light: MDLPhysicallyPlausibleLight) -> Entity? {
+        let entity = Entity()
+        entity.name = light.name
+        if let matrix = light.transform?.matrix {
+            entity.transform = Transform(matrix: matrix)
+        }
+        var rkColor: PointLightComponent.Color = .white
+        if let cg = light.color {
+            #if os(macOS)
+            rkColor = PointLightComponent.Color(cgColor: cg) ?? .white
+            #else
+            rkColor = PointLightComponent.Color(cgColor: cg)
+            #endif
+        }
+        switch light.lightType {
+        case .point:
+            entity.components.set(PointLightComponent(color: rkColor, intensity: light.lumens))
+        case .directional:
+            entity.components.set(DirectionalLightComponent(color: rkColor, intensity: light.lumens))
+        case .spot:
+            entity.components.set(SpotLightComponent(
+                color: rkColor, intensity: light.lumens,
+                innerAngleInDegrees: light.innerConeAngle,
+                outerAngleInDegrees: light.outerConeAngle
+            ))
+        default:
+            return nil
+        }
+        return entity
+    }
+
     // TODO: I don't like the wrappers below, but it was a correction for "sending self.materials risks causing data races"
 
     /// Wrapper to make non-Sendable descriptors transferable across actor boundaries
