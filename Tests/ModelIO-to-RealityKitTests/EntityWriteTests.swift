@@ -126,6 +126,50 @@ import GLTFKit2
     #expect(extents.x > 0 && extents.y > 0 && extents.z > 0, "Loaded USDZ mesh has zero extents")
 }
 
+/// Verifies that the exported USDZ preserves metric scale: a 0.1 m box must reload as 0.1 m.
+/// Catches metersPerUnit = 0.01 and xformOp:scale = (0.01, …) regressions that would produce
+/// a mesh 100× too small (extents ≈ 0.001 m instead of 0.1 m).
+@Test @MainActor func testRoundtripUSDZPreservesExtents() async throws {
+    let size: Float = 0.1
+    let mesh = MeshResource.generateBox(size: size)
+    let entity = ModelEntity(mesh: mesh)
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("usdz")
+    defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+    try await entity.writeMDLAsset(to: tmpURL)
+
+    let loaded = try await Entity(contentsOf: tmpURL)
+    let extents = loaded.visualBounds(relativeTo: nil).extents
+    let tolerance = size * 0.01  // 1 % — well above float round-trip error
+    #expect(abs(extents.x - size) < tolerance, "X extent \(extents.x) should be ~\(size) m")
+    #expect(abs(extents.y - size) < tolerance, "Y extent \(extents.y) should be ~\(size) m")
+    #expect(abs(extents.z - size) < tolerance, "Z extent \(extents.z) should be ~\(size) m")
+}
+
+/// Verifies that an entity's world-space position is baked into the exported vertices.
+/// A box placed at (1, 0, 0) should have bounds centered near (1, 0, 0) after round-trip.
+/// Catches regressions where positions are written in local space (origin) instead of world space.
+@Test @MainActor func testRoundtripUSDZBakesWorldTransform() async throws {
+    let mesh = MeshResource.generateBox(size: 0.1)
+    let entity = ModelEntity(mesh: mesh)
+    entity.position = SIMD3<Float>(1, 0, 0)
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("usdz")
+    defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+    try await entity.writeMDLAsset(to: tmpURL)
+
+    let loaded = try await Entity(contentsOf: tmpURL)
+    let center = loaded.visualBounds(relativeTo: nil).center
+    let tolerance: Float = 0.01
+    #expect(abs(center.x - 1.0) < tolerance, "Center X \(center.x) should be ~1.0 (world transform baked in)")
+    #expect(abs(center.y)       < tolerance, "Center Y \(center.y) should be ~0")
+    #expect(abs(center.z)       < tolerance, "Center Z \(center.z) should be ~0")
+}
+
 /// Downloads the DamagedHelmet GLB, re-exports as USDZ, reloads, and verifies that baseColor
 /// and normal textures survived the round-trip (checks for non-nil PhysicallyBasedMaterial textures).
 @Test @MainActor func testRoundTripDamagedHelmetToUSDZ() async throws {
@@ -138,6 +182,7 @@ import GLTFKit2
     defer { try? FileManager.default.removeItem(at: glbURL) }
 
     let entity = try await GLTFRealityKitLoader.load(from: glbURL)
+    let glbBounds = entity.visualBounds(relativeTo: nil)
 
     let tmpURL = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString)
@@ -159,6 +204,18 @@ import GLTFKit2
     let mat = try #require(firstPBR(loaded), "No PhysicallyBasedMaterial found in reloaded USDZ")
     #expect(mat.baseColor.texture != nil, "baseColor texture was not preserved in USDZ round-trip")
     #expect(mat.normal.texture != nil, "normal texture was not preserved in USDZ round-trip")
+
+    // Verify scale and position: USDZ bounds must match GLB bounds within 5% of the model's size.
+    // Catches metersPerUnit regressions (100× scale error) and lost world-transform bugs.
+    let usdzBounds = loaded.visualBounds(relativeTo: nil)
+    let modelSize = max(glbBounds.extents.x, glbBounds.extents.y, glbBounds.extents.z)
+    let tol = modelSize * 0.05
+    #expect(abs(usdzBounds.extents.x - glbBounds.extents.x) < tol, "X extent \(usdzBounds.extents.x) should match GLB \(glbBounds.extents.x)")
+    #expect(abs(usdzBounds.extents.y - glbBounds.extents.y) < tol, "Y extent \(usdzBounds.extents.y) should match GLB \(glbBounds.extents.y)")
+    #expect(abs(usdzBounds.extents.z - glbBounds.extents.z) < tol, "Z extent \(usdzBounds.extents.z) should match GLB \(glbBounds.extents.z)")
+    #expect(abs(usdzBounds.center.x  - glbBounds.center.x)  < tol, "Center X \(usdzBounds.center.x) should match GLB \(glbBounds.center.x)")
+    #expect(abs(usdzBounds.center.y  - glbBounds.center.y)  < tol, "Center Y \(usdzBounds.center.y) should match GLB \(glbBounds.center.y)")
+    #expect(abs(usdzBounds.center.z  - glbBounds.center.z)  < tol, "Center Z \(usdzBounds.center.z) should match GLB \(glbBounds.center.z)")
 }
 
 @Test @MainActor func testTextureEmbeddedInUSDZ() async throws {

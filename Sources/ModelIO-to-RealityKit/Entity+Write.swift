@@ -168,17 +168,22 @@ private struct MaterialRecord {
         if isUSDZ {
             let usda = stagingDir!.appendingPathComponent("model.usda")
             try asset.export(to: usda)
-            // MDLAsset exports metersPerUnit = 0.01 (centimeters); RealityKit scales vertices by
-            // this value on load. Both the typed ("double") and untyped variants are handled since
-            // the exact form may vary across OS versions.
+            // USD's implicit default for metersPerUnit is 0.01 (centimeters). MDLAsset doesn't
+            // write the key at all, so RealityKit falls back to 0.01 and multiplies every vertex
+            // coordinate by that factor on load — making the model 100× too small.
+            // Fix: correct any explicit 0.01 value written by some MDLAsset versions, then
+            // insert metersPerUnit = 1 into the layer header if none was written.
             var usdaText = try String(contentsOf: usda, encoding: .utf8)
             usdaText = usdaText
                 .replacingOccurrences(of: "double metersPerUnit = 0.01", with: "double metersPerUnit = 1")
                 .replacingOccurrences(of: "metersPerUnit = 0.01",        with: "metersPerUnit = 1")
+            if !usdaText.contains("metersPerUnit") {
+                usdaText = usdaText.replacingOccurrences(
+                    of: "\n)\n\ndef Xform",
+                    with: "\n    metersPerUnit = 1\n)\n\ndef Xform"
+                )
+            }
             try usdaText.write(to: usda, atomically: true, encoding: .utf8)
-            // MDLAsset's empty-init assumes centimeters, so it also writes a 0.01 root xformOp:scale.
-            // Strip it because vertex positions are already in RealityKit world-space meters.
-            try stripRootScale(in: usda)
             // MDLAsset.export drops urlValue on MDLMaterialProperty, so texture UsdUVTexture nodes
             // must be injected by replacing the Materials scope after the fact.
             if materialRecords.contains(where: \.hasTextures) {
@@ -330,40 +335,6 @@ private func patchMaterialsSection(in usda: URL, records: [MaterialRecord]) thro
 
     guard let scopeRange = findScopeRange(in: text, named: "Materials") else { return }
     text.replaceSubrange(scopeRange, with: generateMaterialsSection(records, rootPrim: rootPrim))
-    try text.write(to: usda, atomically: true, encoding: .utf8)
-}
-
-/// Removes the spurious 0.01 root scale that MDLAsset.export writes on the root Xform prim.
-/// MDLAsset's empty init assumes centimeters; the export encodes that assumption as a (0.01, 0.01, 0.01)
-/// xformOp:scale, but our vertices are already in RealityKit world-space meters.
-private func stripRootScale(in usda: URL) throws {
-    var text = try String(contentsOf: usda, encoding: .utf8)
-
-    // Locate the root Xform and its opening brace
-    guard let xformMarker = text.range(of: "def Xform ") else { return }
-    guard let openBrace = text[xformMarker.lowerBound...].firstIndex(of: "{") else { return }
-    let bodyStart = text.index(after: openBrace)
-
-    // Limit the search to the root prim's direct properties, before the first nested child prim
-    let nestedDefEnd = text[bodyStart...].range(of: "\n    def ")?.lowerBound ?? text.endIndex
-    let rootProps = text[bodyStart..<nestedDefEnd]
-
-    guard let scaleRange = rootProps.range(of: "xformOp:scale = (") else { return }
-
-    // Find the full line containing xformOp:scale
-    var lineStart = scaleRange.lowerBound
-    while lineStart > text.startIndex, text[text.index(before: lineStart)] != "\n" {
-        lineStart = text.index(before: lineStart)
-    }
-    var lineEnd = scaleRange.upperBound
-    while lineEnd < text.endIndex, text[lineEnd] != "\n" {
-        lineEnd = text.index(after: lineEnd)
-    }
-    if lineEnd < text.endIndex { lineEnd = text.index(after: lineEnd) }
-
-    let indent = String(text[lineStart..<scaleRange.lowerBound])
-    text.replaceSubrange(lineStart..<lineEnd, with: "\(indent)float3 xformOp:scale = (1, 1, 1)\n")
-
     try text.write(to: usda, atomically: true, encoding: .utf8)
 }
 
