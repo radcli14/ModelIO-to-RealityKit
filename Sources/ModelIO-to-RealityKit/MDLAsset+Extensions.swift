@@ -24,13 +24,18 @@ import RealityKit
     }
     
     /// Any array of RealityKit materials derived from data in the submeshes.
-    /// Falls back to a default PhysicallyBasedMaterial for submeshes with no material (e.g. STL).
+    /// Falls back to a white PhysicallyBasedMaterial for submeshes with no material (e.g. STL).
     func getMaterials() async -> [any RealityKit.Material] {
         var result = [any RealityKit.Material]()
         for mesh in meshes {
             for submesh in mesh.submeshArray {
-                let material = await submesh.material?.getPbrMaterial()
-                result.append(material ?? PhysicallyBasedMaterial())
+                if let material = await submesh.material?.getPbrMaterial() {
+                    result.append(material)
+                } else {
+                    var m = PhysicallyBasedMaterial()
+                    m.baseColor = .init(tint: .white)
+                    result.append(m)
+                }
             }
         }
         return result

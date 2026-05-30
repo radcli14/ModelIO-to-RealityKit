@@ -182,11 +182,13 @@ public extension MDLMesh {
             var descriptor = MeshDescriptor(name: name)
             descriptor.positions = .init(positions)
             
-            // Make sure the coordinates and normals are dimensionally consistent with the positions
+            // Make sure the coordinates and normals are dimensionally consistent with the positions.
+            // Skip all-zero normals (e.g. from STL round-trip where ModelIO writes zeros for the
+            // facet normal field) so RealityKit auto-generates valid normals instead.
             if textureCoordinates.count == positions.count {
                 descriptor.textureCoordinates = .init(textureCoordinates)
             }
-            if normals.count == positions.count {
+            if normals.count == positions.count && normals.contains(where: { simd_length($0) > 0.01 }) {
                 descriptor.normals = .init(normals)
             }
             

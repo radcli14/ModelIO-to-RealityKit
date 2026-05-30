@@ -11,17 +11,23 @@ import RealityKit
 
 extension MDLMaterial {
     
-    /// Extract the `UIColor` representation for this material given the specified ModelIO semantic
+    /// Extract the `UIColor` representation for this material given the specified ModelIO semantic.
+    /// Returns nil if the property does not exist or has never been assigned a value (type .none),
+    /// which distinguishes a genuine black color from a default/unset property.
     func getColor(mdlSemantic: MDLMaterialSemantic) -> [CGFloat]? {
-        if let property: MDLMaterialProperty = property(with: mdlSemantic) {
-            let color = property.float4Value
-            var result = [CGFloat](repeating: 0, count: 4)
-            for k in 0..<4 {
-                result[k] = CGFloat(color[k])
-            }
-            return result
+        guard let property = self.property(with: mdlSemantic),
+              property.type != .none else { return nil }
+        let color = property.float4Value
+        // MDLAsset marks unassigned color properties as (0,0,0,0).
+        // Reject the all-zeros sentinel so callers fall back to their format-appropriate defaults.
+        // Note: formats like USD store color3f (no alpha), so float4Value has alpha=0 even for
+        // real colors — checking only alpha would incorrectly reject valid values like (1,0,0,0).
+        guard color.x != 0 || color.y != 0 || color.z != 0 || color.w != 0 else { return nil }
+        var result = [CGFloat](repeating: 0, count: 4)
+        for k in 0..<4 {
+            result[k] = CGFloat(color[k])
         }
-        return nil
+        return result
     }
     
     /// Get the texture sampler for this material and semantic, if available
@@ -150,16 +156,10 @@ extension MDLMaterial {
     
     /// The `PhysicallyBasedMaterial` representation of the material included in the submesh
     @MainActor func getPbrMaterial() async -> PhysicallyBasedMaterial? {
-        
-        // For debugging, I'm using this to try to find which semantics contain image urls
-        /*print("roughness", MDLMaterialSemantic.roughness.rawValue, MDLMaterialSemantic.specularExponent.rawValue)
-        for semantic in Self.allSemantics {
-            if let url = getUrl(mdlSemantic: semantic) {
-                print(semantic.rawValue, url)
-            }
-        }*/
-        
         var pbrMaterial = PhysicallyBasedMaterial()
+        // Default to white so formats with no color data (e.g. STL) produce a visible,
+        // lit surface instead of the black that PhysicallyBasedMaterial() defaults to.
+        pbrMaterial.baseColor = .init(tint: .init(red: 1, green: 1, blue: 1, alpha: 1))
         if let pbrBaseColor = await getPbrBaseColor() {
             pbrMaterial.baseColor = pbrBaseColor
         }

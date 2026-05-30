@@ -5,6 +5,55 @@ import ModelIO
 import GLTFKit2
 @testable import ModelIO_to_RealityKit
 
+/// Verifies that reloading an STL via fromMDLAsset produces a non-nil PhysicallyBasedMaterial
+/// with a non-black base color. STL has no material data, so the loader must supply a default.
+@Test @MainActor func testSTLRoundtripDefaultMaterial() async throws {
+    let mesh = MeshResource.generateBox(size: 0.1)
+    let entity = ModelEntity(mesh: mesh)
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("stl")
+    defer { try? FileManager.default.removeItem(at: tmpURL) }
+    try await entity.writeMDLAsset(to: tmpURL)
+
+    // Check getMaterials() directly on the MDLAsset — bypasses any RealityKit
+    // default-material substitution that ModelEntity(mesh:materials:) may apply.
+    let asset = MDLAsset(url: tmpURL)
+    let materials = await asset.getMaterials()
+    let mat = try #require(
+        materials.first as? PhysicallyBasedMaterial,
+        "getMaterials() must return a PhysicallyBasedMaterial for STL (got \(materials.first.debugDescription))"
+    )
+    var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0
+    #if os(macOS)
+    (mat.baseColor.tint.usingColorSpace(.sRGB) ?? mat.baseColor.tint).getRed(&r, green: &g, blue: &b, alpha: nil)
+    #else
+    mat.baseColor.tint.getRed(&r, green: &g, blue: &b, alpha: nil)
+    #endif
+    #expect(r > 0 || g > 0 || b > 0,
+            "Default PBR material base color must not be black (got r=\(r) g=\(g) b=\(b))")
+}
+
+/// Verifies that a box written to STL and reloaded via fromMDLAsset produces a valid
+/// ModelEntity with a non-empty mesh. STL's facet normal field is always written as zeros
+/// by MDLAsset's exporter (a ModelIO limitation), so our loader drops all-zero normals and
+/// lets RealityKit auto-generate them — this test confirms the pipeline doesn't crash or
+/// produce a degenerate entity as a result.
+@Test @MainActor func testSTLRoundtripNormals() async throws {
+    let mesh = MeshResource.generateBox(size: 0.1)
+    let entity = ModelEntity(mesh: mesh)
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("stl")
+    defer { try? FileManager.default.removeItem(at: tmpURL) }
+    try await entity.writeMDLAsset(to: tmpURL)
+
+    let loaded = try await ModelEntity.fromMDLAsset(url: tmpURL)
+    let extents = loaded.visualBounds(relativeTo: nil).extents
+    #expect(extents.x > 0 && extents.y > 0 && extents.z > 0,
+            "Reloaded STL entity has zero extents — mesh was not loaded")
+}
+
 @Test @MainActor func testWriteSTL() async throws {
     let mesh = MeshResource.generateBox(size: 0.1)
     let entity = ModelEntity(mesh: mesh)

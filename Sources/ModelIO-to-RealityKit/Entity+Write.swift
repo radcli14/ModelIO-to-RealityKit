@@ -105,36 +105,67 @@ private struct MaterialRecord {
                     guard let triangleIndicesBuffer = part.triangleIndices else { continue }
                     let indexArray = triangleIndicesBuffer.elements
 
-                    // Interleaved layout: float3 position (12) + float3 normal (12) + float2 uv (8) = 32 bytes
-                    let vertexDescriptor = MDLVertexDescriptor()
+                    // Transform positions to world space up front — used for both the vertex
+                    // buffer and face-normal computation when the source mesh has none.
+                    let worldPositions = positions.map { p -> SIMD3<Float> in
+                        let pw = worldTransform * SIMD4<Float>(p.x, p.y, p.z, 1)
+                        return SIMD3<Float>(pw.x, pw.y, pw.z)
+                    }
+
+                    // Always write per-vertex normals. If the source has none (e.g. generated
+                    // primitives, STL), compute flat face normals from triangle connectivity.
+                    // addNormals(withAttributeNamed:) fails silently with MDLMeshBufferDataAllocator.
+                    let hasNormals = normals?.count == positions.count
+                    let hasUVs = uvs?.count == positions.count
+                    let effectiveNormals: [SIMD3<Float>]
+                    if hasNormals {
+                        effectiveNormals = normals!.map { normalize(normalMatrix * $0) }
+                    } else {
+                        var computed = [SIMD3<Float>](repeating: .zero, count: positions.count)
+                        stride(from: 0, to: indexArray.count - 2, by: 3).forEach { t in
+                            let i0 = Int(indexArray[t]), i1 = Int(indexArray[t+1]), i2 = Int(indexArray[t+2])
+                            guard i0 < positions.count, i1 < positions.count, i2 < positions.count else { return }
+                            let fn = normalize(cross(worldPositions[i1] - worldPositions[i0],
+                                                     worldPositions[i2] - worldPositions[i0]))
+                            computed[i0] = fn; computed[i1] = fn; computed[i2] = fn
+                        }
+                        effectiveNormals = computed
+                    }
+
+                    // Interleaved layout: float3 position (12) + float3 normal (12) + optional float2 uv (8)
+                    var attrList = [MDLVertexAttribute]()
                     let posAttr = MDLVertexAttribute()
                     posAttr.name = MDLVertexAttributePosition; posAttr.format = .float3
                     posAttr.offset = 0; posAttr.bufferIndex = 0
+                    attrList.append(posAttr)
                     let normAttr = MDLVertexAttribute()
                     normAttr.name = MDLVertexAttributeNormal; normAttr.format = .float3
                     normAttr.offset = 12; normAttr.bufferIndex = 0
-                    let uvAttr = MDLVertexAttribute()
-                    uvAttr.name = MDLVertexAttributeTextureCoordinate; uvAttr.format = .float2
-                    uvAttr.offset = 24; uvAttr.bufferIndex = 0
-                    vertexDescriptor.attributes = NSMutableArray(array: [posAttr, normAttr, uvAttr])
-                    let layout = MDLVertexBufferLayout(); layout.stride = 32
+                    attrList.append(normAttr)
+                    if hasUVs {
+                        let uvAttr = MDLVertexAttribute()
+                        uvAttr.name = MDLVertexAttributeTextureCoordinate; uvAttr.format = .float2
+                        uvAttr.offset = 24; uvAttr.bufferIndex = 0
+                        attrList.append(uvAttr)
+                    }
+                    let stride = hasUVs ? 32 : 24
+                    let vertexDescriptor = MDLVertexDescriptor()
+                    vertexDescriptor.attributes = NSMutableArray(array: attrList)
+                    let layout = MDLVertexBufferLayout(); layout.stride = stride
                     vertexDescriptor.layouts = NSMutableArray(array: [layout])
 
                     var vertexData = Data()
-                    vertexData.reserveCapacity(positions.count * 32)
+                    vertexData.reserveCapacity(positions.count * stride)
                     for i in 0..<positions.count {
-                        let p = positions[i]
-                        let pw = worldTransform * SIMD4<Float>(p.x, p.y, p.z, 1)
-                        var xyz = (pw.x, pw.y, pw.z)
+                        var xyz = (worldPositions[i].x, worldPositions[i].y, worldPositions[i].z)
                         withUnsafeBytes(of: &xyz) { vertexData.append(contentsOf: $0) }
-                        let nw: SIMD3<Float> = (normals?.count == positions.count)
-                            ? normalize(normalMatrix * normals![i])
-                            : .zero
-                        var nxyz = (nw.x, nw.y, nw.z)
+                        var nxyz = (effectiveNormals[i].x, effectiveNormals[i].y, effectiveNormals[i].z)
                         withUnsafeBytes(of: &nxyz) { vertexData.append(contentsOf: $0) }
-                        let uv: SIMD2<Float> = (uvs?.count == positions.count) ? uvs![i] : .zero
-                        var uvxy = (uv.x, uv.y)
-                        withUnsafeBytes(of: &uvxy) { vertexData.append(contentsOf: $0) }
+                        if hasUVs {
+                            let uv = uvs![i]
+                            var uvxy = (uv.x, uv.y)
+                            withUnsafeBytes(of: &uvxy) { vertexData.append(contentsOf: $0) }
+                        }
                     }
 
                     let vertexBuffer = allocator.newBuffer(with: vertexData, type: .vertex)
