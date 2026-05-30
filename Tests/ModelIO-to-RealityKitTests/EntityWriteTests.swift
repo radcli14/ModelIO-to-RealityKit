@@ -216,6 +216,15 @@ import GLTFKit2
                 "roughness \(mat.roughness.scale) should match GLB \(glbMat.roughness.scale)")
     }
 
+    // Metallic: texture or scalar must survive (GLTFKit2 splits the packed metallicRoughness
+    // texture into green→roughness and blue→metallic TextureResources before we see it)
+    if glbMat.metallic.texture != nil {
+        #expect(mat.metallic.texture != nil, "metallic texture was not retained in USDZ round-trip")
+    } else {
+        #expect(abs(mat.metallic.scale - glbMat.metallic.scale) < 0.05,
+                "metallic \(mat.metallic.scale) should match GLB \(glbMat.metallic.scale)")
+    }
+
     // Opacity: blending mode and scale must survive
     let glbOpacity: Float = { if case .transparent(let o) = glbMat.blending { return o.scale }; return 1.0 }()
     let usdzOpacity: Float = { if case .transparent(let o) = mat.blending { return o.scale }; return 1.0 }()
