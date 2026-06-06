@@ -365,3 +365,65 @@ import GLTFKit2
     let pngMagic = Data([0x89, 0x50, 0x4E, 0x47])
     #expect(zipData.range(of: pngMagic) != nil, "USDZ archive does not contain any PNG texture; baseColor texture was not embedded")
 }
+
+/// Downloads the DamagedHelmet GLB, re-exports as OBJ, reloads, and verifies that
+/// material data survived the round-trip.  The OBJ code path was previously broken:
+/// MDLAsset.export silently drops urlValue on MDLMaterialProperty, so map_Kd and
+/// related MTL directives were never written — producing a white untextured mesh.
+/// This test validates the patchOBJMTL fix that injects those directives after export.
+@Test @MainActor func testRoundTripDamagedHelmetToOBJPreservesMaterial() async throws {
+    let remoteURL = URL(string: "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/refs/heads/main/Models/DamagedHelmet/glTF-Binary/DamagedHelmet.glb")!
+    let (tmp, _) = try await URLSession.shared.download(from: remoteURL)
+    let glbURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("glb")
+    try FileManager.default.moveItem(at: tmp, to: glbURL)
+    defer { try? FileManager.default.removeItem(at: glbURL) }
+
+    let entity = try await GLTFRealityKitLoader.load(from: glbURL)
+
+    func firstPBR(_ e: Entity) -> PhysicallyBasedMaterial? {
+        if let m = (e as? ModelEntity)?.model?.materials.first as? PhysicallyBasedMaterial { return m }
+        for child in e.children { if let found = firstPBR(child) { return found } }
+        return nil
+    }
+
+    let glbMat = try #require(firstPBR(entity), "No PhysicallyBasedMaterial found in GLB entity")
+
+    // Use a dedicated temp directory so the OBJ, MTL, and texture PNGs are all cleaned up together.
+    let tmpDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("TestOBJExport-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+    let objURL = tmpDir.appendingPathComponent("DamagedHelmet.obj")
+    defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+    try await entity.writeMDLAsset(to: objURL)
+    #expect(FileManager.default.fileExists(atPath: objURL.path), "OBJ was not created")
+
+    // Reload via the ModelIO pipeline that the library ships.
+    let loaded = try await Entity.fromMDLAsset(url: objURL)
+    let mat = try #require(firstPBR(loaded), "No PhysicallyBasedMaterial found after OBJ reload")
+
+    // Base color texture must survive: patchOBJMTL injects map_Kd so the MDL loader
+    // can resolve it to a TextureResource on reload.
+    #expect(mat.baseColor.texture != nil,
+            "baseColor texture was not preserved in OBJ round-trip (map_Kd missing from MTL)")
+
+    // Metallic: DamagedHelmet packs metallic in a texture; accept texture or high scalar.
+    if glbMat.metallic.texture != nil {
+        #expect(mat.metallic.texture != nil || mat.metallic.scale > 0.5,
+                "metallic was not preserved in OBJ round-trip (map_Pm missing or Pm=0)")
+    } else {
+        #expect(abs(mat.metallic.scale - glbMat.metallic.scale) < 0.05,
+                "metallic \(mat.metallic.scale) should match GLB value \(glbMat.metallic.scale)")
+    }
+
+    // Roughness: same texture-or-scalar logic.
+    if glbMat.roughness.texture != nil {
+        #expect(mat.roughness.texture != nil || abs(mat.roughness.scale - glbMat.roughness.scale) < 0.1,
+                "roughness was not preserved in OBJ round-trip (map_Pr missing or Pr mismatch)")
+    } else {
+        #expect(abs(mat.roughness.scale - glbMat.roughness.scale) < 0.05,
+                "roughness \(mat.roughness.scale) should match GLB value \(glbMat.roughness.scale)")
+    }
+}

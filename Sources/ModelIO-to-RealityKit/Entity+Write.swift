@@ -328,6 +328,12 @@ private struct MaterialRecord {
             try packageAsUSDZ(stagingDir: stagingDir!, to: url)
         } else if isOBJ {
             try asset.export(to: url)
+            // MDLAsset.export silently drops urlValue on MDLMaterialProperty for OBJ just as it
+            // does for USD. Texture PNG files are already written to the OBJ directory by
+            // makeMatRecord; we now inject the map_ directives into the generated MTL sidecar.
+            if !materialRecords.isEmpty {
+                try patchOBJMTL(objURL: url, records: materialRecords)
+            }
         } else {
             try asset.export(to: url)
             // For USDA, inject lights into the exported text file.
@@ -512,6 +518,52 @@ private func findScopeRange(in text: String, named name: String) -> Range<String
     var endPos = text.index(after: pos)
     if endPos < text.endIndex && text[endPos] == "\n" { endPos = text.index(after: endPos) }
     return lineStart ..< endPos
+}
+
+/// Appends texture map directives to the OBJ sidecar MTL file.
+/// MDLAsset.export drops urlValue on MDLMaterialProperty for OBJ the same way it does for USD,
+/// so map_Kd / norm / map_Pr / map_Pm / map_Ke / map_ao are missing from the generated MTL.
+/// The PNG files are already on disk (written by makeMatRecord); this function injects the
+/// missing references so that the MDL OBJ loader can resolve them on reload.
+private func patchOBJMTL(objURL: URL, records: [MaterialRecord]) throws {
+    let mtlURL = objURL.deletingPathExtension().appendingPathExtension("mtl")
+    guard FileManager.default.fileExists(atPath: mtlURL.path) else { return }
+    var mtl = try String(contentsOf: mtlURL, encoding: .utf8)
+
+    // Ordered list preserves deterministic directive order in the patched MTL.
+    let directives: [(key: String, mtlDirective: String)] = [
+        ("diffuseColor",  "map_Kd"),
+        ("normal",        "norm"),
+        ("roughness",     "map_Pr"),
+        ("metallic",      "map_Pm"),
+        ("emissiveColor", "map_Ke"),
+        ("occlusion",     "map_ao"),
+    ]
+
+    for record in records where record.hasTextures {
+        let marker = "newmtl \(record.name)"
+        guard let markerRange = mtl.range(of: marker) else { continue }
+
+        // Find the start of the next material block, or end of string if this is the last one.
+        let searchFrom = markerRange.upperBound
+        let insertAt: String.Index
+        if let next = mtl.range(of: "\nnewmtl ", range: searchFrom..<mtl.endIndex) {
+            insertAt = next.lowerBound
+        } else {
+            insertAt = mtl.endIndex
+        }
+
+        var block = ""
+        for (key, directive) in directives {
+            guard let filename = record.textureFiles[key] else { continue }
+            block += "\(directive) \(filename)\n"
+        }
+        if !block.isEmpty {
+            mtl.insert(contentsOf: "\n" + block, at: insertAt)
+        }
+    }
+
+    try mtl.write(to: mtlURL, atomically: true, encoding: .utf8)
 }
 
 /// Generates a replacement `def Scope "Materials"` block with correct UsdPreviewSurface
