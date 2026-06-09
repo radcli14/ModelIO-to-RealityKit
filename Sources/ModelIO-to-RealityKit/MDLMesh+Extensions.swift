@@ -166,35 +166,50 @@ public extension MDLMesh {
     }
     
     // MARK: - RealityKit
-    
-    /// An array of `MeshDescriptor` derived from the `positions` array and primitive indices contained in the `submeshes`
-    @MainActor var descriptors: [MeshDescriptor] {
-        
-        // Get the computed properties first, so they aren't computed multiple times inside the map
+
+    /// Returns one `(MeshDescriptor, MDLMaterial?)` pair per *valid* submesh of this mesh.
+    ///
+    /// A submesh is considered valid when it has a non-nil `primitives` result (e.g. triangles,
+    /// strips, quads — not lines, points, or variableTopology).  Invalid submeshes are skipped
+    /// and logged.  Callers must pair each returned descriptor with its material in the same loop
+    /// so that descriptor and material arrays stay strictly 1-to-1.
+    @MainActor func validSubmeshPairs() -> [(descriptor: MeshDescriptor, material: MDLMaterial?)] {
         let positions = positions
         let textureCoordinates = textureCoordinates
         let normals = normals
-        guard !positions.isEmpty else { return [] }
+        let submeshes = submeshArray
+        let meshLabel = name.isEmpty ? "(unnamed)" : name
 
-        // Map the mesh descriptors from the submeshes
-        return submeshArray.map { submesh in
-            // Initialize the descriptor with positions
+        guard !positions.isEmpty else {
+            print("[RealityKitFormats] MDLMesh \(meshLabel): skipped — empty positions (\(submeshes.count) submesh(es) dropped)")
+            return []
+        }
+
+        var pairs: [(MeshDescriptor, MDLMaterial?)] = []
+        for (i, submesh) in submeshes.enumerated() {
+            guard let primitives = submesh.primitives else {
+                print("[RealityKitFormats] MDLMesh \(meshLabel) submesh[\(i)]: skipped — unsupported geometry type \(submesh.geometryType.rawValue)")
+                continue
+            }
             var descriptor = MeshDescriptor(name: name)
             descriptor.positions = .init(positions)
-            
-            // Make sure the coordinates and normals are dimensionally consistent with the positions.
-            // Skip all-zero normals (e.g. from STL round-trip where ModelIO writes zeros for the
-            // facet normal field) so RealityKit auto-generates valid normals instead.
             if textureCoordinates.count == positions.count {
                 descriptor.textureCoordinates = .init(textureCoordinates)
             }
+            // Skip all-zero normals (STL round-trip writes zeros; RealityKit auto-generates instead).
             if normals.count == positions.count && normals.contains(where: { simd_length($0) > 0.01 }) {
                 descriptor.normals = .init(normals)
             }
-            
-            // Add primitives from the submesh
-            descriptor.primitives = submesh.primitives
-            return descriptor
+            descriptor.primitives = primitives
+            pairs.append((descriptor, submesh.material))
         }
+
+        print("[RealityKitFormats] MDLMesh \(meshLabel): \(submeshes.count) submesh(es) → \(pairs.count) valid descriptor(s)")
+        return pairs
+    }
+
+    /// An array of `MeshDescriptor` derived from the `positions` array and primitive indices contained in the `submeshes`
+    @MainActor var descriptors: [MeshDescriptor] {
+        validSubmeshPairs().map { $0.descriptor }
     }
 }

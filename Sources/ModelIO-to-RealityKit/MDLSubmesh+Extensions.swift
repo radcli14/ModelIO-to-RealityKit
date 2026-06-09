@@ -20,54 +20,75 @@ public extension MDLSubmesh {
         return Data(bytes: indexBuffer.map().bytes, count: indexBuffer.length)
     }
     
-    /// The array of indices defining face connectivity
+    /// The array of indices defining face connectivity, upcast to UInt32.
     var indices: [UInt32] {
         var result: [UInt32] = []
-
-        // Access the raw memory pointer of the index data
-        indexData.withUnsafeBytes { (bufferPointer) in
-            guard let baseAddress = bufferPointer.baseAddress else { return }
-
+        indexData.withUnsafeBytes { buf in
+            guard let base = buf.baseAddress else { return }
             switch self.indexType {
+            case .uint8:
+                let p = base.assumingMemoryBound(to: UInt8.self)
+                for i in 0..<indexCount { result.append(UInt32(p[i])) }
             case .uint16:
-                // Data is 16-bit (UInt16), so we read and convert to UInt32
-                let pointer = baseAddress.assumingMemoryBound(to: UInt16.self)
-                for i in 0..<indexCount {
-                    // Read the 16-bit index and cast it up to 32-bit
-                    result.append(UInt32(pointer[i]))
-                }
-            
+                let p = base.assumingMemoryBound(to: UInt16.self)
+                for i in 0..<indexCount { result.append(UInt32(p[i])) }
             case .uint32:
-                // Data is already 32-bit (UInt32)
-                let pointer = baseAddress.assumingMemoryBound(to: UInt32.self)
-                for i in 0..<indexCount {
-                    result.append(pointer[i])
-                }
-            
+                let p = base.assumingMemoryBound(to: UInt32.self)
+                for i in 0..<indexCount { result.append(p[i]) }
             default:
-                // Handle unsupported types (e.g., .invalid)
-                print("MDLSubmesh indexType \(self.indexType.rawValue) not supported for unpacking indices.")
-                return
+                print("[RealityKitFormats] MDLSubmesh: unsupported indexType \(self.indexType.rawValue) — submesh will be skipped")
             }
         }
-        
         return result
     }
     
     @MainActor var primitives: MeshDescriptor.Primitives? {
-        var geometryString = ""
         switch geometryType {
-        case .triangles: return .triangles(indices)
-        case .quads: return .trianglesAndQuads(triangles: [], quads: indices)
-        case .variableTopology: geometryString = "variableTopology"
-        case .triangleStrips: geometryString = "triangleStrips"
-        case .lines: geometryString = "lines"
-        case .points: geometryString = "points"
+        case .triangles:
+            return .triangles(indices)
+
+        case .triangleStrips:
+            // Convert triangle strip to an indexed triangle list.
+            // Odd-numbered triangles have their first two indices swapped to maintain
+            // consistent CCW winding across the strip.
+            let src = indices
+            guard src.count >= 3 else { return nil }
+            var tri: [UInt32] = []
+            tri.reserveCapacity((src.count - 2) * 3)
+            for i in 0..<(src.count - 2) {
+                if i % 2 == 0 {
+                    tri += [src[i], src[i + 1], src[i + 2]]
+                } else {
+                    tri += [src[i + 1], src[i], src[i + 2]]
+                }
+            }
+            print("[RealityKitFormats] MDLSubmesh: triangleStrip \(src.count) indices → \(tri.count / 3) triangles")
+            return .triangles(tri)
+
+        case .quads:
+            // Fan-triangulate each quad: (v0,v1,v2) + (v0,v2,v3).
+            let src = indices
+            var tri: [UInt32] = []
+            tri.reserveCapacity(src.count / 4 * 6)
+            for i in stride(from: 0, to: src.count - 3, by: 4) {
+                tri += [src[i], src[i + 1], src[i + 2],
+                        src[i], src[i + 2], src[i + 3]]
+            }
+            print("[RealityKitFormats] MDLSubmesh: quads with \(src.count / 4) quads → \(tri.count / 3) triangles")
+            return .triangles(tri)
+
+        case .lines, .points:
+            print("[RealityKitFormats] MDLSubmesh: geometry type \(geometryType) is not a surface — skipping")
+            return nil
+
+        case .variableTopology:
+            print("[RealityKitFormats] MDLSubmesh: variableTopology not yet supported — skipping submesh")
+            return nil
+
         @unknown default:
-            geometryString = "???"
+            print("[RealityKitFormats] MDLSubmesh: unknown geometry type \(geometryType.rawValue) — skipping")
+            return nil
         }
-        print("MDLSubmesh geometryType: \(geometryString) is unknown or not handled, returning nil")
-        return nil
     }
 }
 

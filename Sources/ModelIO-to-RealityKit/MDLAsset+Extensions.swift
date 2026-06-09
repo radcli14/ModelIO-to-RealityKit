@@ -12,19 +12,23 @@ import RealityKit
 
 @MainActor public extension MDLAsset {
     
-    /// An array of RealityKit `MeshDescriptor` derived from the meshes in this model
+    /// An array of RealityKit `MeshDescriptor` derived from the meshes in this model.
+    /// NOTE: Does not set materialIndex — use `getModelEntity()` for correct multi-material meshes.
     var meshDescriptors: [MeshDescriptor] {
         meshes.flatMap { $0.descriptors }
     }
-    
-    /// Asynchronously obtain a RealityKit `MeshResource` derived from the meshes in this model
+
+    /// Asynchronously obtain a RealityKit `MeshResource` derived from the meshes in this model.
+    /// NOTE: Does not set materialIndex — use `getModelEntity()` for correct multi-material meshes.
     func getMeshResource() async throws -> MeshResource {
         let sendableDescriptors = UnsafeSendableDescriptors(descriptors: meshDescriptors)
         return try await MeshResource(from: sendableDescriptors.descriptors)
     }
-    
+
     /// Any array of RealityKit materials derived from data in the submeshes.
     /// Falls back to a white PhysicallyBasedMaterial for submeshes with no material (e.g. STL).
+    /// NOTE: This iterates all submeshes without filtering. Use `getModelEntity()` to guarantee
+    /// that the material list is exactly 1:1 with the valid descriptors.
     func getMaterials() async -> [any RealityKit.Material] {
         var result = [any RealityKit.Material]()
         for mesh in meshes {
@@ -41,10 +45,39 @@ import RealityKit
         return result
     }
 
-    /// Asynchronously obtain a `ModelEntity` based on the mesh resources and materials contained in this asset
+    /// Asynchronously obtain a `ModelEntity` based on the mesh resources and materials in this asset.
+    ///
+    /// Processes every submesh in a single synchronized pass: each (descriptor, material) pair is
+    /// built from the same submesh, invalid submeshes are skipped in BOTH arrays, and each
+    /// descriptor's `materialIndex` is set to the index of its paired material in the final array.
+    /// This prevents index drift between descriptors and materials when some submeshes are skipped.
     func getModelEntity() async throws -> ModelEntity {
-        let materials = await getMaterials()
-        let meshResource = try await getMeshResource()
+        let allMeshes = meshes
+        print("[RealityKitFormats] MDLAsset: \(allMeshes.count) mesh(es)")
+
+        var descriptors: [MeshDescriptor] = []
+        var materials: [any RealityKit.Material] = []
+
+        for mesh in allMeshes {
+            let pairs = mesh.validSubmeshPairs()
+            for (var descriptor, mdlMaterial) in pairs {
+                // .allFaces assigns every primitive in this descriptor to the material
+                // at the given slot in the ModelEntity's materials array.
+                descriptor.materials = .allFaces(UInt32(materials.count))
+                descriptors.append(descriptor)
+                if let mat = await mdlMaterial?.getPbrMaterial() {
+                    materials.append(mat)
+                } else {
+                    var m = PhysicallyBasedMaterial()
+                    m.baseColor = .init(tint: .white)
+                    materials.append(m)
+                }
+            }
+        }
+
+        print("[RealityKitFormats] MDLAsset: \(descriptors.count) descriptor(s), \(materials.count) material(s)")
+        let sendable = UnsafeSendableDescriptors(descriptors: descriptors)
+        let meshResource = try await MeshResource(from: sendable.descriptors)
         return ModelEntity(mesh: meshResource, materials: materials)
     }
 

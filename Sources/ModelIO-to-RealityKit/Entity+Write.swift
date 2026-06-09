@@ -186,7 +186,9 @@ private struct MaterialRecord {
         let allocator = MDLMeshBufferDataAllocator()
         var materialRecords = [MaterialRecord]()
         var materialCounter = 0
+        var partCount = 0
 
+        print("[RealityKitFormats] writeMDLAsset → \(url.lastPathComponent): \(modelEntities.count) model entit(y|ies)")
         for modelEntity in modelEntities {
             guard let models = modelEntity.model?.mesh.contents.models else { continue }
             let materials = modelEntity.model?.materials ?? []
@@ -307,9 +309,11 @@ private struct MaterialRecord {
                         submeshes: [submesh]
                     )
                     asset.add(mdlMesh)
+                    partCount += 1
                 }
             }
         }
+        print("[RealityKitFormats] writeMDLAsset: \(partCount) part(s) written, \(materialRecords.count) material record(s)")
 
         // Collect lights from the entity tree for injection into USD text formats.
         var lightCounter = 0
