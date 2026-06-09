@@ -191,11 +191,19 @@ private struct MaterialRecord {
             guard let models = modelEntity.model?.mesh.contents.models else { continue }
             let materials = modelEntity.model?.materials ?? []
             let worldTransform = modelEntity.transformMatrix(relativeTo: nil)
-            let normalMatrix = simd_float3x3(columns: (
+            let m3 = simd_float3x3(columns: (
                 SIMD3<Float>(worldTransform[0].x, worldTransform[0].y, worldTransform[0].z),
                 SIMD3<Float>(worldTransform[1].x, worldTransform[1].y, worldTransform[1].z),
                 SIMD3<Float>(worldTransform[2].x, worldTransform[2].y, worldTransform[2].z)
             ))
+            // Inverse-transpose of upper-left 3×3 is the correct normal transform.
+            // Plain 3×3 is wrong under non-uniform scale: it distorts perpendicularity,
+            // making normals point away from the actual surface tangent plane.
+            let normalMatrix = m3.inverse.transpose
+            // Negative determinant means the world transform includes a reflection.
+            // That reverses the triangle winding order, so we swap i1↔i2 to restore
+            // CCW convention and keep back-face culling and lighting correct.
+            let hasNegDet = m3.determinant < 0
             for model in models {
                 for part in model.parts {
                     let positions = part.positions.elements
@@ -203,7 +211,12 @@ private struct MaterialRecord {
                     let normals = part.normals?.elements
                     let uvs = part.textureCoordinates?.elements
                     guard let triangleIndicesBuffer = part.triangleIndices else { continue }
-                    let indexArray = triangleIndicesBuffer.elements
+                    var indexArray = Array(triangleIndicesBuffer.elements)
+                    if hasNegDet {
+                        for t in stride(from: 0, to: indexArray.count - 2, by: 3) {
+                            indexArray.swapAt(t + 1, t + 2)
+                        }
+                    }
 
                     // Transform positions to world space up front — used for both the vertex
                     // buffer and face-normal computation when the source mesh has none.
@@ -269,7 +282,9 @@ private struct MaterialRecord {
                     }
 
                     let vertexBuffer = allocator.newBuffer(with: vertexData, type: .vertex)
-                    let indexData = indexArray.withUnsafeBytes { Data($0) }
+                    let indexData = indexArray.withUnsafeBufferPointer {
+                        Data(bytes: $0.baseAddress!, count: $0.count * MemoryLayout<UInt32>.size)
+                    }
                     let indexBuffer = allocator.newBuffer(with: indexData, type: .index)
 
                     let matIdx = Int(part.materialIndex)
@@ -332,7 +347,7 @@ private struct MaterialRecord {
             // does for USD. Texture PNG files are already written to the OBJ directory by
             // makeMatRecord; we now inject the map_ directives into the generated MTL sidecar.
             if !materialRecords.isEmpty {
-                try patchOBJMTL(objURL: url, records: materialRecords)
+                try rewriteOBJMTL(objURL: url, records: materialRecords)
             }
         } else {
             try asset.export(to: url)
@@ -520,50 +535,55 @@ private func findScopeRange(in text: String, named name: String) -> Range<String
     return lineStart ..< endPos
 }
 
-/// Appends texture map directives to the OBJ sidecar MTL file.
-/// MDLAsset.export drops urlValue on MDLMaterialProperty for OBJ the same way it does for USD,
-/// so map_Kd / norm / map_Pr / map_Pm / map_Ke / map_ao are missing from the generated MTL.
-/// The PNG files are already on disk (written by makeMatRecord); this function injects the
-/// missing references so that the MDL OBJ loader can resolve them on reload.
-private func patchOBJMTL(objURL: URL, records: [MaterialRecord]) throws {
+/// Writes a complete OBJ sidecar MTL file from MaterialRecord data, replacing whatever
+/// MDLAsset.export generated. MDLAsset does not reliably translate PBR base color to Kd
+/// (it silently drops the value or writes 1 1 1 white), so this function generates the
+/// entire MTL from the captured material records instead of patching the generated file.
+/// Solid-color materials produce correct Kd; textured materials also get map_Kd et al.
+private func rewriteOBJMTL(objURL: URL, records: [MaterialRecord]) throws {
     let mtlURL = objURL.deletingPathExtension().appendingPathExtension("mtl")
-    guard FileManager.default.fileExists(atPath: mtlURL.path) else { return }
-    var mtl = try String(contentsOf: mtlURL, encoding: .utf8)
-
-    // Ordered list preserves deterministic directive order in the patched MTL.
-    let directives: [(key: String, mtlDirective: String)] = [
-        ("diffuseColor",  "map_Kd"),
-        ("normal",        "norm"),
-        ("roughness",     "map_Pr"),
-        ("metallic",      "map_Pm"),
-        ("emissiveColor", "map_Ke"),
-        ("occlusion",     "map_ao"),
-    ]
-
-    for record in records where record.hasTextures {
-        let marker = "newmtl \(record.name)"
-        guard let markerRange = mtl.range(of: marker) else { continue }
-
-        // Find the start of the next material block, or end of string if this is the last one.
-        let searchFrom = markerRange.upperBound
-        let insertAt: String.Index
-        if let next = mtl.range(of: "\nnewmtl ", range: searchFrom..<mtl.endIndex) {
-            insertAt = next.lowerBound
-        } else {
-            insertAt = mtl.endIndex
+    var lines = ["# RealityKitFormats material export"]
+    for record in records {
+        let c = record.baseColorTint
+        let e = record.emissiveColorTint
+        // Ns round-trips roughness exactly via roughness = sqrt(2/(Ns+2)):
+        //   write Ns = 2/roughness² − 2  →  read back roughness = sqrt(2/(Ns+2)) = roughness.
+        // Clamp roughness away from 0 to avoid Ns = +∞.
+        let roughness = max(record.roughnessScale, 0.001)
+        let ns = max(0.0, 2.0 / (roughness * roughness) - 2.0)
+        lines += [
+            "",
+            "newmtl \(record.name)",
+            "Ka 0.000000 0.000000 0.000000",
+            String(format: "Kd %.6f %.6f %.6f", c.x, c.y, c.z),
+            String(format: "Ks %.6f %.6f %.6f",
+                   record.metallicScale * c.x,
+                   record.metallicScale * c.y,
+                   record.metallicScale * c.z),
+            String(format: "Ns %.4f", ns),
+        ]
+        if e.x > 0 || e.y > 0 || e.z > 0 {
+            lines.append(String(format: "Ke %.6f %.6f %.6f", e.x, e.y, e.z))
         }
-
-        var block = ""
-        for (key, directive) in directives {
-            guard let filename = record.textureFiles[key] else { continue }
-            block += "\(directive) \(filename)\n"
+        if record.opacity < 1.0 {
+            lines.append(String(format: "d %.6f", record.opacity))
         }
-        if !block.isEmpty {
-            mtl.insert(contentsOf: "\n" + block, at: insertAt)
+        lines.append("illum 2")
+        let textureDirectives: [(key: String, directive: String)] = [
+            ("diffuseColor",  "map_Kd"),
+            ("normal",        "norm"),
+            ("roughness",     "map_Pr"),
+            ("metallic",      "map_Pm"),
+            ("emissiveColor", "map_Ke"),
+            ("occlusion",     "map_ao"),
+        ]
+        for (key, directive) in textureDirectives {
+            if let filename = record.textureFiles[key] {
+                lines.append("\(directive) \(filename)")
+            }
         }
     }
-
-    try mtl.write(to: mtlURL, atomically: true, encoding: .utf8)
+    try lines.joined(separator: "\n").write(to: mtlURL, atomically: true, encoding: .utf8)
 }
 
 /// Generates a replacement `def Scope "Materials"` block with correct UsdPreviewSurface
