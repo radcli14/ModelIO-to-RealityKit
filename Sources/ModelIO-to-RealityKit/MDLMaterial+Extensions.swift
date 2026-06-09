@@ -106,15 +106,13 @@ extension MDLMaterial {
     
     
     /// Attempts to extract the Base Color, prioritizing texture, then numeric value.
-    /// Checks `.baseColor` (PBR — GLB/USDZ) first, then falls back to `.diffuse`
-    /// (Phong — OBJ/MTL, where ModelIO maps Kd and map_Kd to the diffuse semantic).
     @MainActor func getPbrBaseColor() async -> PhysicallyBasedMaterial.BaseColor? {
-        for semantic in [MDLMaterialSemantic.baseColor, .diffuse] {
-            if let resource = await getTextureResource(mdlSemantic: semantic, rkSemantic: .color) {
-                return .init(texture: .init(resource))
-            } else if let color = getColor(mdlSemantic: semantic) {
-                return .init(tint: .init(red: color[0], green: color[1], blue: color[2], alpha: color[3]))
-            }
+        // Check for a texture map (file reference), or a numeric value.
+        // ModelIO maps OBJ Kd/map_Kd to .baseColor (Apple unified diffuse+baseColor under one semantic).
+        if let resource = await getTextureResource(mdlSemantic: .baseColor, rkSemantic: .color) {
+            return .init(texture: .init(resource))
+        } else if let color = getColor(mdlSemantic: .baseColor) {
+            return .init(tint: .init(red: color[0], green: color[1], blue: color[2], alpha: color[3]))
         }
         return nil
     }
