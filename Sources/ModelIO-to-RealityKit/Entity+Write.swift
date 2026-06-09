@@ -161,7 +161,7 @@ private struct MaterialRecord {
 
 @MainActor public extension Entity {
 
-    func writeMDLAsset(to url: URL) async throws {
+    func writeMDLAsset(to url: URL, mergeSubmeshes: Bool = false) async throws {
         let modelEntities = collectModelEntities(self)
         guard !modelEntities.isEmpty else { throw ModelIOWriteError.noMeshesFound }
 
@@ -187,6 +187,15 @@ private struct MaterialRecord {
         var materialRecords = [MaterialRecord]()
         var materialCounter = 0
         var partCount = 0
+
+        struct MergePart {
+            let worldPositions: [SIMD3<Float>]
+            let effectiveNormals: [SIMD3<Float>]
+            let uvs: [SIMD2<Float>]?
+            let indexArray: [UInt32]
+        }
+        var mergeParts: [MergePart] = []
+        var mergeFirstRecord: MaterialRecord? = nil
 
         print("[RealityKitFormats] writeMDLAsset → \(url.lastPathComponent): \(modelEntities.count) model entit(y|ies)")
         for modelEntity in modelEntities {
@@ -289,30 +298,117 @@ private struct MaterialRecord {
                     }
                     let indexBuffer = allocator.newBuffer(with: indexData, type: .index)
 
-                    let matIdx = Int(part.materialIndex)
-                    let pbr = (matIdx < materials.count ? materials[matIdx] : materials.first) as? PhysicallyBasedMaterial
-                    let record = try pbr.map { try makeMatRecord(from: $0, textureDir: stagingDir ?? objTextureDir, index: materialCounter) }
-                    materialCounter += 1
-                    if let r = record { materialRecords.append(r) }
+                    if mergeSubmeshes {
+                        // Only capture the first part's material for the single merged mesh.
+                        if mergeParts.isEmpty {
+                            let matIdx = Int(part.materialIndex)
+                            let pbr = (matIdx < materials.count ? materials[matIdx] : materials.first) as? PhysicallyBasedMaterial
+                            let record = try pbr.map { try makeMatRecord(from: $0, textureDir: stagingDir ?? objTextureDir, index: 0) }
+                            if let r = record { materialRecords.append(r); mergeFirstRecord = r }
+                        }
+                        mergeParts.append(MergePart(
+                            worldPositions: worldPositions,
+                            effectiveNormals: effectiveNormals,
+                            uvs: hasUVs ? uvs! : nil,
+                            indexArray: indexArray
+                        ))
+                    } else {
+                        let matIdx = Int(part.materialIndex)
+                        let pbr = (matIdx < materials.count ? materials[matIdx] : materials.first) as? PhysicallyBasedMaterial
+                        let record = try pbr.map { try makeMatRecord(from: $0, textureDir: stagingDir ?? objTextureDir, index: materialCounter) }
+                        materialCounter += 1
+                        if let r = record { materialRecords.append(r) }
 
-                    let submesh = MDLSubmesh(
-                        indexBuffer: indexBuffer,
-                        indexCount: indexArray.count,
-                        indexType: .uInt32,
-                        geometryType: .triangles,
-                        material: record?.mdlMaterial
-                    )
-                    let mdlMesh = MDLMesh(
-                        vertexBuffer: vertexBuffer,
-                        vertexCount: positions.count,
-                        descriptor: vertexDescriptor,
-                        submeshes: [submesh]
-                    )
-                    asset.add(mdlMesh)
+                        let submesh = MDLSubmesh(
+                            indexBuffer: indexBuffer,
+                            indexCount: indexArray.count,
+                            indexType: .uInt32,
+                            geometryType: .triangles,
+                            material: record?.mdlMaterial
+                        )
+                        let mdlMesh = MDLMesh(
+                            vertexBuffer: vertexBuffer,
+                            vertexCount: positions.count,
+                            descriptor: vertexDescriptor,
+                            submeshes: [submesh]
+                        )
+                        asset.add(mdlMesh)
+                    }
                     partCount += 1
                 }
             }
         }
+        if mergeSubmeshes && !mergeParts.isEmpty {
+            let mergedHasUVs = mergeParts.allSatisfy { $0.uvs != nil }
+            var allPositions: [SIMD3<Float>] = []
+            var allNormals: [SIMD3<Float>] = []
+            var allUVs: [SIMD2<Float>] = []
+            var allIndices: [UInt32] = []
+            for mp in mergeParts {
+                let base = UInt32(allPositions.count)
+                allPositions.append(contentsOf: mp.worldPositions)
+                allNormals.append(contentsOf: mp.effectiveNormals)
+                if mergedHasUVs { allUVs.append(contentsOf: mp.uvs!) }
+                allIndices.append(contentsOf: mp.indexArray.map { $0 + base })
+            }
+
+            var mergedAttrList = [MDLVertexAttribute]()
+            let mPosAttr = MDLVertexAttribute()
+            mPosAttr.name = MDLVertexAttributePosition; mPosAttr.format = .float3
+            mPosAttr.offset = 0; mPosAttr.bufferIndex = 0
+            mergedAttrList.append(mPosAttr)
+            let mNormAttr = MDLVertexAttribute()
+            mNormAttr.name = MDLVertexAttributeNormal; mNormAttr.format = .float3
+            mNormAttr.offset = 12; mNormAttr.bufferIndex = 0
+            mergedAttrList.append(mNormAttr)
+            if mergedHasUVs {
+                let mUVAttr = MDLVertexAttribute()
+                mUVAttr.name = MDLVertexAttributeTextureCoordinate; mUVAttr.format = .float2
+                mUVAttr.offset = 24; mUVAttr.bufferIndex = 0
+                mergedAttrList.append(mUVAttr)
+            }
+            let mergedStride = mergedHasUVs ? 32 : 24
+            let mergedVDesc = MDLVertexDescriptor()
+            mergedVDesc.attributes = NSMutableArray(array: mergedAttrList)
+            let mergedLayout = MDLVertexBufferLayout(); mergedLayout.stride = mergedStride
+            mergedVDesc.layouts = NSMutableArray(array: [mergedLayout])
+
+            var mergedVData = Data()
+            mergedVData.reserveCapacity(allPositions.count * mergedStride)
+            for i in 0..<allPositions.count {
+                var xyz = (allPositions[i].x, allPositions[i].y, allPositions[i].z)
+                withUnsafeBytes(of: &xyz) { mergedVData.append(contentsOf: $0) }
+                var nxyz = (allNormals[i].x, allNormals[i].y, allNormals[i].z)
+                withUnsafeBytes(of: &nxyz) { mergedVData.append(contentsOf: $0) }
+                if mergedHasUVs {
+                    var uvxy = (allUVs[i].x, allUVs[i].y)
+                    withUnsafeBytes(of: &uvxy) { mergedVData.append(contentsOf: $0) }
+                }
+            }
+
+            let mergedVBuf = allocator.newBuffer(with: mergedVData, type: .vertex)
+            let mergedIData = allIndices.withUnsafeBufferPointer {
+                Data(bytes: $0.baseAddress!, count: $0.count * MemoryLayout<UInt32>.size)
+            }
+            let mergedIBuf = allocator.newBuffer(with: mergedIData, type: .index)
+
+            let mergedSubmesh = MDLSubmesh(
+                indexBuffer: mergedIBuf,
+                indexCount: allIndices.count,
+                indexType: .uInt32,
+                geometryType: .triangles,
+                material: mergeFirstRecord?.mdlMaterial
+            )
+            let mergedMesh = MDLMesh(
+                vertexBuffer: mergedVBuf,
+                vertexCount: allPositions.count,
+                descriptor: mergedVDesc,
+                submeshes: [mergedSubmesh]
+            )
+            asset.add(mergedMesh)
+            print("[RealityKitFormats] writeMDLAsset: merged \(mergeParts.count) part(s) → 1 mesh, \(allPositions.count) vertices, \(allIndices.count / 3) triangles")
+        }
+
         print("[RealityKitFormats] writeMDLAsset: \(partCount) part(s) written, \(materialRecords.count) material record(s)")
 
         // Collect lights from the entity tree for injection into USD text formats.
