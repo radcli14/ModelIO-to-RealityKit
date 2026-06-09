@@ -159,6 +159,20 @@ private struct MaterialRecord {
     var hasTextures: Bool { !textureFiles.isEmpty }
 }
 
+/// All skeleton/animation data needed to write USD SkelRoot / Skeleton / SkelAnimation prims.
+private struct SkelExportData {
+    let skeleton: MeshResource.Skeleton
+    let jointPaths: [String]        // USD slash-separated path per joint: "Palm", "Palm/Thumb0", …
+    let poseTransforms: [Transform] // current-pose transforms, local (parent-relative) space
+}
+
+/// Joint influence data for one mesh part, indexed by its insertion order into MDLAsset.
+private struct PartInfluenceRecord {
+    let meshIndex: Int                          // 0-based; matches prim names found in the USDA
+    let influences: MeshResource.JointInfluences
+    let influencesPerVertex: Int                // influences.count / vertexCount; computed at collection time
+}
+
 @MainActor public extension Entity {
 
     func writeMDLAsset(to url: URL) async throws {
@@ -187,6 +201,11 @@ private struct MaterialRecord {
         var materialRecords = [MaterialRecord]()
         var materialCounter = 0
 
+        // Skeleton and per-part influence data collected during the mesh loop below.
+        var skelData: SkelExportData?
+        var partInfluences = [PartInfluenceRecord]()
+        var meshIndex = 0
+
         for modelEntity in modelEntities {
             guard let models = modelEntity.model?.mesh.contents.models else { continue }
             let materials = modelEntity.model?.materials ?? []
@@ -196,6 +215,20 @@ private struct MaterialRecord {
                 SIMD3<Float>(worldTransform[1].x, worldTransform[1].y, worldTransform[1].z),
                 SIMD3<Float>(worldTransform[2].x, worldTransform[2].y, worldTransform[2].z)
             ))
+
+            // Collect the first skeleton found in this entity's mesh resource.
+            if skelData == nil, let mesh = modelEntity.model?.mesh,
+               let skel = mesh.contents.skeletons.first(where: { _ in true }) {
+                // jointNames on ModelEntity returns the USD joint path tokens in the same order
+                // as the skeleton joints and joint influences — use them directly when available.
+                let rawNames = modelEntity.jointNames
+                let paths = rawNames.isEmpty ? buildJointPaths(from: skel) : rawNames
+                let rawPose = modelEntity.jointTransforms
+                // Prefer live joint transforms; fall back to rest-pose transforms if unavailable.
+                let pose = rawPose.isEmpty ? skel.joints.map { $0.restPoseTransform } : rawPose
+                skelData = SkelExportData(skeleton: skel, jointPaths: paths, poseTransforms: pose)
+            }
+
             for model in models {
                 for part in model.parts {
                     let positions = part.positions.elements
@@ -212,6 +245,11 @@ private struct MaterialRecord {
                         return SIMD3<Float>(pw.x, pw.y, pw.z)
                     }
 
+                    // Skinned mesh parts must export bind-pose positions; the USD skeleton handles
+                    // the deformation. Static mesh parts bake the world transform into vertices.
+                    let hasSkinning = part.jointInfluences != nil
+                    let exportPositions = hasSkinning ? positions : worldPositions
+
                     // Always write per-vertex normals. If the source has none (e.g. generated
                     // primitives, STL), compute flat face normals from triangle connectivity.
                     // addNormals(withAttributeNamed:) fails silently with MDLMeshBufferDataAllocator.
@@ -219,14 +257,17 @@ private struct MaterialRecord {
                     let hasUVs = uvs?.count == positions.count
                     let effectiveNormals: [SIMD3<Float>]
                     if hasNormals {
-                        effectiveNormals = normals!.map { normalize(normalMatrix * $0) }
+                        // Skinned normals remain in bind-pose space; the skeleton deforms them.
+                        effectiveNormals = hasSkinning
+                            ? normals!
+                            : normals!.map { normalize(normalMatrix * $0) }
                     } else {
                         var computed = [SIMD3<Float>](repeating: .zero, count: positions.count)
                         stride(from: 0, to: indexArray.count - 2, by: 3).forEach { t in
                             let i0 = Int(indexArray[t]), i1 = Int(indexArray[t+1]), i2 = Int(indexArray[t+2])
-                            guard i0 < positions.count, i1 < positions.count, i2 < positions.count else { return }
-                            let fn = normalize(cross(worldPositions[i1] - worldPositions[i0],
-                                                     worldPositions[i2] - worldPositions[i0]))
+                            guard i0 < exportPositions.count, i1 < exportPositions.count, i2 < exportPositions.count else { return }
+                            let fn = normalize(cross(exportPositions[i1] - exportPositions[i0],
+                                                     exportPositions[i2] - exportPositions[i0]))
                             computed[i0] = fn; computed[i1] = fn; computed[i2] = fn
                         }
                         effectiveNormals = computed
@@ -257,7 +298,7 @@ private struct MaterialRecord {
                     var vertexData = Data()
                     vertexData.reserveCapacity(positions.count * stride)
                     for i in 0..<positions.count {
-                        var xyz = (worldPositions[i].x, worldPositions[i].y, worldPositions[i].z)
+                        var xyz = (exportPositions[i].x, exportPositions[i].y, exportPositions[i].z)
                         withUnsafeBytes(of: &xyz) { vertexData.append(contentsOf: $0) }
                         var nxyz = (effectiveNormals[i].x, effectiveNormals[i].y, effectiveNormals[i].z)
                         withUnsafeBytes(of: &nxyz) { vertexData.append(contentsOf: $0) }
@@ -292,6 +333,13 @@ private struct MaterialRecord {
                         submeshes: [submesh]
                     )
                     asset.add(mdlMesh)
+
+                    if hasSkinning, let inf = part.jointInfluences {
+                        let ipv = positions.isEmpty ? 0 : inf.influences.count / positions.count
+                        partInfluences.append(PartInfluenceRecord(meshIndex: meshIndex, influences: inf,
+                                                                   influencesPerVertex: ipv))
+                    }
+                    meshIndex += 1
                 }
             }
         }
@@ -319,6 +367,22 @@ private struct MaterialRecord {
                 )
             }
             injectLights(exportedLights, into: &usdaText)
+            // Inject USD skeleton prims when the source has skinned mesh data.
+            if let skel = skelData, !partInfluences.isEmpty {
+                var rootPrim = "model"
+                if let r = usdaText.range(of: "defaultPrim = \"") {
+                    let after = usdaText[r.upperBound...]
+                    if let end = after.firstIndex(of: "\"") { rootPrim = String(after[..<end]) }
+                }
+                // Work on a copy; only commit if the root prim was actually found and modified.
+                var candidate = usdaText
+                injectSkelPrims(into: &candidate, rootPrim: rootPrim, skelData: skel,
+                                partInfluences: partInfluences)
+                // Confirm the injection produced a SkelRoot prim before committing.
+                if candidate.contains("def SkelRoot") {
+                    usdaText = candidate
+                }
+            }
             try usdaText.write(to: usda, atomically: true, encoding: .utf8)
             // MDLAsset.export drops urlValue on MDLMaterialProperty, so texture UsdUVTexture nodes
             // must be injected by replacing the Materials scope after the fact.
@@ -612,6 +676,246 @@ private func generateMaterialsSection(_ records: [MaterialRecord], rootPrim: Str
 
     lines.append("\(ind1)}")
     return lines.joined(separator: "\n") + "\n"
+}
+
+// MARK: - USD Skeleton helpers
+
+/// Builds USD joint path strings (e.g. "Palm", "Palm/Thumb0") from parent-index topology.
+private func buildJointPaths(from skeleton: MeshResource.Skeleton) -> [String] {
+    var paths = [String](repeating: "", count: skeleton.joints.count)
+    for (i, joint) in skeleton.joints.enumerated() {
+        if let p = joint.parentIndex, p < i {
+            paths[i] = paths[p] + "/" + joint.name
+        } else {
+            paths[i] = joint.name
+        }
+    }
+    return paths
+}
+
+/// Returns true when every element of m is a finite float (not nan/inf).
+/// USD text parsers reject nan/inf literals and produce .importFailureWithURL on load.
+private func isFiniteMatrix(_ m: simd_float4x4) -> Bool {
+    let cols = [m.columns.0, m.columns.1, m.columns.2, m.columns.3]
+    return cols.allSatisfy { c in c.x.isFinite && c.y.isFinite && c.z.isFinite && c.w.isFinite }
+}
+
+/// Formats a simd_float4x4 as a USD `matrix4d` literal in row-major order.
+private func matrix4dString(_ m: simd_float4x4) -> String {
+    let c = m.columns
+    // USD matrix4d rows: row[i] = (col0[i], col1[i], col2[i], col3[i])
+    return "((\(c.0.x), \(c.1.x), \(c.2.x), \(c.3.x)), " +
+           "(\(c.0.y), \(c.1.y), \(c.2.y), \(c.3.y)), " +
+           "(\(c.0.z), \(c.1.z), \(c.2.z), \(c.3.z)), " +
+           "(\(c.0.w), \(c.1.w), \(c.2.w), \(c.3.w)))"
+}
+
+/// Returns all `def Mesh "…"` prim names found in the USDA text, in document order.
+private func findMeshPrimNames(in text: String) -> [String] {
+    var names = [String]()
+    var cursor = text.startIndex
+    while cursor < text.endIndex {
+        guard let found = text.range(of: "def Mesh \"", range: cursor..<text.endIndex) else { break }
+        let nameStart = found.upperBound
+        guard let nameEnd = text[nameStart...].firstIndex(of: "\"") else { break }
+        names.append(String(text[nameStart..<nameEnd]))
+        cursor = text.index(after: nameEnd)
+    }
+    return names
+}
+
+/// Returns the index of the prim body opening `{`, correctly skipping any metadata `(…)`
+/// block that may appear between the prim declaration and its body. USD metadata blocks
+/// can contain dictionary values like `assetInfo = { … }` whose inner braces would
+/// otherwise be mistaken for the prim body by a naive `firstIndex(of: "{")` search.
+private func findPrimBodyBrace(in text: String, from start: String.Index) -> String.Index? {
+    var pos = start
+    while pos < text.endIndex {
+        switch text[pos] {
+        case "(":
+            // Skip the entire (...) metadata block, including nested parens.
+            var depth = 1
+            pos = text.index(after: pos)
+            while pos < text.endIndex, depth > 0 {
+                switch text[pos] {
+                case "(": depth += 1; pos = text.index(after: pos)
+                case ")": depth -= 1; if depth > 0 { pos = text.index(after: pos) }
+                default: pos = text.index(after: pos)
+                }
+            }
+            if pos < text.endIndex { pos = text.index(after: pos) }
+        case "{":
+            return pos   // first { after any metadata block is the prim body
+        default:
+            pos = text.index(after: pos)
+        }
+    }
+    return nil
+}
+
+/// Inserts `content` just before the closing brace of the first prim named `primName`.
+private func insertBeforeClosingBrace(ofPrimNamed primName: String, in text: inout String, content: String) {
+    // Search for any prim-type declaration with this name (SkelRoot, Xform, Scope, …).
+    let candidates = ["def SkelRoot \"\(primName)\"", "def Xform \"\(primName)\"",
+                      "def Scope \"\(primName)\"",    "def \"\(primName)\""]
+    var afterMarker: String.Index?
+    for candidate in candidates {
+        if let r = text.range(of: candidate) { afterMarker = r.upperBound; break }
+    }
+    guard let start = afterMarker else { return }
+    // Use findPrimBodyBrace to skip any (…) metadata block before the prim body {
+    guard let openBrace = findPrimBodyBrace(in: text, from: start) else { return }
+    var pos = text.index(after: openBrace)
+    var depth = 1
+    while pos < text.endIndex, depth > 0 {
+        switch text[pos] {
+        case "{": depth += 1; pos = text.index(after: pos)
+        case "}": depth -= 1; if depth > 0 { pos = text.index(after: pos) }
+        default:  pos = text.index(after: pos)
+        }
+    }
+    text.insert(contentsOf: content, at: pos)
+}
+
+/// Injects USD SkelRoot type change, Skeleton prim, SkelAnimation prim, and per-mesh
+/// SkelBindingAPI + joint indices/weights primvars into the exported USDA text.
+private func injectSkelPrims(
+    into text: inout String,
+    rootPrim: String,
+    skelData: SkelExportData,
+    partInfluences: [PartInfluenceRecord]
+) {
+    let ind1 = "    "
+    let ind2 = "        "
+
+    // 1. Build Skeleton prim content up front — guard before touching the text so a failed
+    //    guard leaves the file completely unmodified (avoids a half-injected SkelRoot).
+    let jointTokens = skelData.jointPaths.map { "\"\($0)\"" }.joined(separator: ", ")
+    // inverseBindPoseMatrix stores M^-1; we need M = (M^-1)^-1 for USD bindTransforms.
+    // Guard: simd_float4x4.inverse produces nan/inf for degenerate matrices.
+    // USD text parsers reject these literals and return .importFailureWithURL on load.
+    let bindMatrices = skelData.skeleton.joints.map { $0.inverseBindPoseMatrix.inverse }
+    guard bindMatrices.allSatisfy(isFiniteMatrix) else { return }
+    let bindMats = bindMatrices.map { matrix4dString($0) }.joined(separator: ",\n\(ind2)    ")
+    // Use the captured live pose transforms as USD restTransforms (the default rendered pose).
+    // poseTransforms comes from modelEntity.jointTransforms (local-to-parent) and is always finite.
+    let restMats = skelData.poseTransforms.map { matrix4dString($0.matrix) }
+        .joined(separator: ",\n\(ind2)    ")
+
+    // SkelRoot is just a scope boundary — it does NOT need SkelBindingAPI.
+    // The binding lives on each skinnable mesh prim via SkelBindingAPI + rel skel:skeleton.
+    let skelPrimText = "\n" +
+        "\(ind1)def Skeleton \"skeleton\"\n" +
+        "\(ind1){\n" +
+        "\(ind2)uniform token[] joints = [\(jointTokens)]\n" +
+        "\(ind2)uniform matrix4d[] bindTransforms = [\(bindMats)]\n" +
+        "\(ind2)uniform matrix4d[] restTransforms = [\(restMats)]\n" +
+        "\(ind1)}\n"
+
+    // 2. Promote root prim from plain Xform to SkelRoot.
+    text = text.replacingOccurrences(of: "def Xform \"\(rootPrim)\"",
+                                     with: "def SkelRoot \"\(rootPrim)\"")
+
+    // 3. Insert Skeleton prim inside the root prim body.
+    insertBeforeClosingBrace(ofPrimNamed: rootPrim, in: &text, content: skelPrimText)
+
+    // 4. Inject SkelBindingAPI + rel skel:skeleton + skinning primvars into each mesh prim.
+    //    Process in REVERSE document order so earlier insertions don't invalidate later indices.
+    let meshNames = findMeshPrimNames(in: text)
+    for record in partInfluences.reversed() {
+        guard record.meshIndex < meshNames.count else { continue }
+        let meshName = meshNames[record.meshIndex]
+        injectSkinningIntoPrim(named: meshName, rootPrim: rootPrim, in: &text,
+                               influences: record.influences,
+                               influencesPerVertex: record.influencesPerVertex)
+    }
+}
+
+/// Injects `SkelBindingAPI`, `rel skel:skeleton`, `primvars:skel:jointIndices`, and
+/// `primvars:skel:jointWeights` into a Mesh prim. Each skinnable mesh must carry the
+/// `SkelBindingAPI` schema and the `skel:skeleton` relationship directly; RealityKit does not
+/// resolve inherited bindings from an ancestor SkelRoot.
+private func injectSkinningIntoPrim(
+    named primName: String,
+    rootPrim: String,
+    in text: inout String,
+    influences: MeshResource.JointInfluences,
+    influencesPerVertex: Int
+) {
+    let meshMarker = "def Mesh \"\(primName)\""
+
+    // Step 1: Add SkelBindingAPI to the mesh prim's apiSchemas metadata block.
+    guard let markerRange = text.range(of: meshMarker) else { return }
+    let afterMarker = markerRange.upperBound
+    guard let bodyBrace = findPrimBodyBrace(in: text, from: afterMarker) else { return }
+    let metaRange = afterMarker..<bodyBrace
+
+    // MDLAsset writes `prepend apiSchemas = ["MaterialBindingAPI"]` for meshes with materials.
+    // Insert SkelBindingAPI at the front of the existing list; fall back to creating a new entry.
+    if let apiRange = text.range(of: "prepend apiSchemas = [", range: metaRange) {
+        text.insert(contentsOf: "\"SkelBindingAPI\", ", at: apiRange.upperBound)
+    } else if let lastParen = text[metaRange].lastIndex(of: ")") {
+        text.insert(contentsOf: "    prepend apiSchemas = [\"SkelBindingAPI\"]\n", at: lastParen)
+    }
+
+    // Step 2: Re-find body brace after the metadata mutation shifted indices.
+    guard let newMarkerRange = text.range(of: meshMarker) else { return }
+    guard let newBodyBrace = findPrimBodyBrace(in: text, from: newMarkerRange.upperBound) else { return }
+
+    // Step 3: Find the closing brace of the mesh body.
+    var closingBrace = text.index(after: newBodyBrace)
+    var depth = 1
+    while closingBrace < text.endIndex, depth > 0 {
+        switch text[closingBrace] {
+        case "{": depth += 1; closingBrace = text.index(after: closingBrace)
+        case "}": depth -= 1; if depth > 0 { closingBrace = text.index(after: closingBrace) }
+        default:  closingBrace = text.index(after: closingBrace)
+        }
+    }
+
+    // Step 4: Build skinning primvars.
+    // USDZ / RealityKit supports at most 4 joint influences per vertex.
+    // If the source has more (e.g. ipv=5), keep the top 4 by weight and renormalize.
+    let rawIPV = influencesPerVertex
+    let targetIPV = min(rawIPV, 4)
+    // elementSize = 0 is invalid USD and can cause .importFailureWithURL on load.
+    guard targetIPV > 0 else { return }
+    let elements = influences.influences.elements
+    let numVerts = rawIPV > 0 ? elements.count / rawIPV : 0
+
+    var indices = [Int]()
+    var weights = [Float]()
+    indices.reserveCapacity(numVerts * targetIPV)
+    weights.reserveCapacity(numVerts * targetIPV)
+
+    for v in 0..<numVerts {
+        let base = v * rawIPV
+        var pairs = (0..<rawIPV).map { i in
+            (idx: elements[base + i].jointIndex, wgt: elements[base + i].weight)
+        }
+        if rawIPV > targetIPV {
+            pairs.sort { $0.wgt > $1.wgt }
+            pairs = Array(pairs.prefix(targetIPV))
+            let total = pairs.reduce(Float(0)) { $0 + $1.wgt }
+            if total > 0 { pairs = pairs.map { (idx: $0.idx, wgt: $0.wgt / total) } }
+        }
+        for pair in pairs { indices.append(pair.idx); weights.append(pair.wgt) }
+    }
+    let ipv = targetIPV
+
+    let ind2 = "        "
+    let skinText = "\n" +
+        "\(ind2)rel skel:skeleton = </\(rootPrim)/skeleton>\n" +
+        "\(ind2)int[] primvars:skel:jointIndices (\n" +
+        "\(ind2)    elementSize = \(ipv)\n" +
+        "\(ind2)    interpolation = \"vertex\"\n" +
+        "\(ind2)) = [\(indices.map { String($0) }.joined(separator: ", "))]\n" +
+        "\(ind2)float[] primvars:skel:jointWeights (\n" +
+        "\(ind2)    elementSize = \(ipv)\n" +
+        "\(ind2)    interpolation = \"vertex\"\n" +
+        "\(ind2)) = [\(weights.map { String($0) }.joined(separator: ", "))]\n"
+
+    text.insert(contentsOf: skinText, at: closingBrace)
 }
 
 /// Packages all files in stagingDir into a USDZ ZIP archive.

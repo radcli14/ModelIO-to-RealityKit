@@ -37,7 +37,8 @@ let package = Package(
                 .process("xyzBlock.mtl"),
                 .process("Diffuse.png"),
                 .process("normal.png"),
-                .process("roughness.png")
+                .process("roughness.png"),
+                .process("left_hand.usdz"),
             ]
         ),
     ]

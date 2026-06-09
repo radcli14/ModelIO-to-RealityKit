@@ -344,6 +344,182 @@ import GLTFKit2
     #expect(zipData.range(of: sphereLightMarker) != nil, "USDZ archive does not contain a SphereLight prim")
 }
 
+// MARK: - Skeleton / Armature Round-Trip Tests
+
+/// Diagnostic test: writes left_hand.usdz and saves the intermediate USDA to /tmp for
+/// manual inspection. Also prints skeleton/joint info. Does not assert on content.
+@Test @MainActor func testLeftHandUSDZDumpUSDA() async throws {
+    let handURL = try #require(
+        Bundle.module.url(forResource: "left_hand", withExtension: "usdz"),
+        "left_hand.usdz not found in test bundle"
+    )
+    let source = try await Entity(contentsOf: handURL)
+
+    // Print skeleton / joint-name info from the loaded entity tree
+    func printEntityInfo(_ e: Entity, depth: Int = 0) {
+        let indent = String(repeating: "  ", count: depth)
+        if let me = e as? ModelEntity, let mesh = me.model?.mesh {
+            var skelCount = 0; for _ in mesh.contents.skeletons { skelCount += 1 }
+            let jt = me.jointTransforms; let jn = me.jointNames
+            print("\(indent)ModelEntity '\(e.name)': skeletons=\(skelCount) jointTransforms=\(jt.count) jointNames=\(jn.count)")
+            if !jn.isEmpty { print("\(indent)  first joint names: \(jn.prefix(5))") }
+            for model in mesh.contents.models {
+                for part in model.parts {
+                    let hasInf = part.jointInfluences != nil
+                    print("\(indent)  Part '\(part.id)': jointInfluences=\(hasInf) positions=\(part.positions.count)")
+                    if let inf = part.jointInfluences {
+                        let ipv = part.positions.count > 0 ? inf.influences.count / part.positions.count : -1
+                        print("\(indent)    influences.count=\(inf.influences.count) ipv=\(ipv)")
+                    }
+                }
+            }
+        } else {
+            print("\(indent)Entity '\(e.name)' (non-model)")
+        }
+        for child in e.children { printEntityInfo(child, depth: depth + 1) }
+    }
+    printEntityInfo(source)
+
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("left_hand_debug")
+        .appendingPathExtension("usdz")
+
+    try await source.writeMDLAsset(to: tmpURL)
+    #expect(FileManager.default.fileExists(atPath: tmpURL.path),
+            "USDZ not created at \(tmpURL.path)")
+
+    // Extract USDA from the USDZ ZIP by parsing the local file header (no compression in USDZ)
+    var usda = ""
+    if let zipData = try? Data(contentsOf: tmpURL), zipData.count >= 30 {
+        let hdr = [UInt8](zipData.prefix(30))
+        if hdr[0] == 0x50 && hdr[1] == 0x4B && hdr[2] == 0x03 && hdr[3] == 0x04 {
+            let fnLen = Int(hdr[26]) | (Int(hdr[27]) << 8)
+            let exLen = Int(hdr[28]) | (Int(hdr[29]) << 8)
+            let fileSize = Int(hdr[22]) | (Int(hdr[23]) << 8) | (Int(hdr[24]) << 16) | (Int(hdr[25]) << 24)
+            let dataStart = 30 + fnLen + exLen
+            if dataStart + fileSize <= zipData.count {
+                let fileData = Data(zipData[dataStart..<(dataStart + fileSize)])
+                usda = String(data: fileData, encoding: .utf8) ?? "(non-UTF8 content, \(fileSize) bytes)"
+            } else {
+                usda = "(ZIP truncated: need \(dataStart + fileSize) bytes, have \(zipData.count))"
+            }
+        } else {
+            usda = "(not a ZIP signature)"
+        }
+    }
+    let debugPath = "/tmp/left_hand_debug.usda"
+    try usda.write(toFile: debugPath, atomically: true, encoding: .utf8)
+    print("USDA saved to \(debugPath) (\(usda.count) chars)")
+    print("First 3000 chars:\n\(String(usda.prefix(3000)))")
+}
+
+/// Verifies that the visual bounding box of left_hand.usdz (a hand mesh deformed by a USD skeleton)
+/// is preserved after writing to USDZ and reloading. Before the skeleton preservation fix this test
+/// is expected to fail because writeMDLAsset exports only bind-pose (flat) vertex positions,
+/// so the reloaded entity has a smaller/different bounding box than the original bent-finger pose.
+@Test @MainActor func testLeftHandUSDZBoundsPreservedOnRoundTrip() async throws {
+    let handURL = try #require(
+        Bundle.module.url(forResource: "left_hand", withExtension: "usdz"),
+        "left_hand.usdz not found in test bundle"
+    )
+
+    let source = try await Entity(contentsOf: handURL)
+    let sourceBounds = source.visualBounds(relativeTo: nil)
+
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("usdz")
+    defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+    try await source.writeMDLAsset(to: tmpURL)
+
+    let loaded = try await Entity(contentsOf: tmpURL)
+    let loadedBounds = loaded.visualBounds(relativeTo: nil)
+
+    let modelSize = max(sourceBounds.extents.x, sourceBounds.extents.y, sourceBounds.extents.z)
+    let tol = modelSize * 0.05  // 5 % tolerance — accounts for float round-trip, not 100× scale error
+
+    withKnownIssue("Skeleton deformation not yet preserved in USDZ export") {
+        #expect(abs(loadedBounds.extents.x - sourceBounds.extents.x) < tol,
+                "X extent \(loadedBounds.extents.x) should match source \(sourceBounds.extents.x)")
+        #expect(abs(loadedBounds.extents.y - sourceBounds.extents.y) < tol,
+                "Y extent \(loadedBounds.extents.y) should match source \(sourceBounds.extents.y)")
+        #expect(abs(loadedBounds.extents.z - sourceBounds.extents.z) < tol,
+                "Z extent \(loadedBounds.extents.z) should match source \(sourceBounds.extents.z)")
+        #expect(abs(loadedBounds.center.x - sourceBounds.center.x) < tol,
+                "Center X \(loadedBounds.center.x) should match source \(sourceBounds.center.x)")
+        #expect(abs(loadedBounds.center.y - sourceBounds.center.y) < tol,
+                "Center Y \(loadedBounds.center.y) should match source \(sourceBounds.center.y)")
+        #expect(abs(loadedBounds.center.z - sourceBounds.center.z) < tol,
+                "Center Z \(loadedBounds.center.z) should match source \(sourceBounds.center.z)")
+    }
+}
+
+/// Verifies that a left_hand.usdz round-trip produces a non-degenerate entity with visible geometry.
+/// This test documents the baseline that the geometry (even without skeleton) survives the export.
+@Test @MainActor func testLeftHandUSDZHasMeshAfterRoundTrip() async throws {
+    let handURL = try #require(
+        Bundle.module.url(forResource: "left_hand", withExtension: "usdz"),
+        "left_hand.usdz not found in test bundle"
+    )
+
+    let source = try await Entity(contentsOf: handURL)
+
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("usdz")
+    defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+    try await source.writeMDLAsset(to: tmpURL)
+    #expect(FileManager.default.fileExists(atPath: tmpURL.path), "USDZ file should exist after write")
+
+    do {
+        let loaded = try await Entity(contentsOf: tmpURL)
+        let bounds = loaded.visualBounds(relativeTo: nil)
+        let hasGeometry = bounds.extents.x > 0 || bounds.extents.y > 0 || bounds.extents.z > 0
+        #expect(hasGeometry, "Round-tripped left_hand.usdz should have non-zero visual extents")
+    } catch {
+        // Emit a rich diagnostic before re-throwing so we know exactly where to look.
+        let ns = error as NSError
+        print("=== USDZ import failure ===")
+        print("  domain : \(ns.domain)")
+        print("  code   : \(ns.code)")
+        print("  desc   : \(ns.localizedDescription)")
+        for (k, v) in ns.userInfo { print("  userInfo[\(k)] = \(v)") }
+        if let under = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
+            print("  underlying domain:\(under.domain) code:\(under.code) desc:\(under.localizedDescription)")
+        }
+
+        // Try loading the USDA directly (bypasses USDZ ZIP) to distinguish
+        // packaging failure from schema/content failure.
+        if let zipData = try? Data(contentsOf: tmpURL), zipData.count >= 30 {
+            let hdr = [UInt8](zipData.prefix(30))
+            if hdr[0] == 0x50 && hdr[1] == 0x4B {
+                let fnLen = Int(hdr[26]) | (Int(hdr[27]) << 8)
+                let exLen = Int(hdr[28]) | (Int(hdr[29]) << 8)
+                let fsz   = Int(hdr[22]) | (Int(hdr[23]) << 8) | (Int(hdr[24]) << 16) | (Int(hdr[25]) << 24)
+                let start = 30 + fnLen + exLen
+                if start + fsz <= zipData.count,
+                   let usdaStr = String(data: Data(zipData[start..<(start + fsz)]), encoding: .utf8) {
+                    let usdaURL = FileManager.default.temporaryDirectory
+                        .appendingPathComponent(UUID().uuidString).appendingPathExtension("usda")
+                    defer { try? FileManager.default.removeItem(at: usdaURL) }
+                    try usdaStr.write(to: usdaURL, atomically: true, encoding: .utf8)
+                    print("  Trying to load extracted USDA directly: \(usdaURL.path)")
+                    do {
+                        _ = try await Entity(contentsOf: usdaURL)
+                        print("  → USDA loaded OK — issue is in USDZ packaging")
+                    } catch {
+                        let nsU = error as NSError
+                        print("  → USDA also fails: domain:\(nsU.domain) code:\(nsU.code) \(nsU.localizedDescription)")
+                    }
+                }
+            }
+        }
+        throw error
+    }
+}
+
 @Test @MainActor func testTextureEmbeddedInUSDZ() async throws {
     let objURL = try #require(Bundle.module.url(forResource: "xyzBlock", withExtension: "obj"), "xyzBlock.obj not found in test bundle")
 
